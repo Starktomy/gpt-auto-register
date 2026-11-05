@@ -1,42 +1,56 @@
+<h1 align="center">gpt-outlook-register</h1>
+
+<p align="center">纯协议 ChatGPT 账号注册机：<code>curl_cffi</code> 模拟 TLS 指纹 + QuickJS 解 OpenAI Sentinel PoW + 邮箱取 OTP，直接走 OpenAI authorize 状态机，无浏览器、无 Playwright、无 Camoufox。</p>
+
+> [!WARNING]
+> 免责声明：本项目仅供个人学习、技术研究与非商业性技术交流使用。严禁用于任何商业用途、批量滥用、规模化调用，或违反 OpenAI 服务条款及当地法律法规的行为。使用者自行承担全部风险，包括账号被限制、封禁及相应法律责任。请勿使用自己的重要账号或高价值账号进行测试。
 
 技术交流群：259844673
 
-
 <img width="280" height="265" alt="image" src="https://github.com/user-attachments/assets/a24f9f9b-0dfa-440e-8ee8-6e461d03eeea" />
 
+## 核心特性
 
-**完全无浏览器**：用 `curl_cffi` 模拟 TLS 指纹 + 纯 Python/QuickJS 解 OpenAI Sentinel PoW + IMAP XOAUTH2 取 OTP，直接走 OpenAI authorize 状态机。
+| 能力 | 说明 |
+|---|---|
+| **多邮箱来源** | Remail 商业邮箱 API / Outlook 接码池 / CF Worker 自建 catch-all / iCloud 中继，WebUI 下拉切换，加新邮箱前端零改动 |
+| **Remail 订单管理** | 下单、取件、禁用、删除、钱包余额、订单复用，长效订单可重复使用（上限 10 次），短效订单用尽即失效 |
+| **代理池** | 存后端 SQLite，支持静态/动态类型区分、单代理注册配额上限（默认 50）、CF 拦截自动停用、IPv6 出口检测、失败归还预占配额 |
+| **全自动循环** | 多 worker 并发（1-20），每 worker 独立代理，失败自动换号/换代理，网络错误熔断 |
+| **错误分类** | `network` / `cf_blocked` / `mail_limited` 等分类，区分「换代理」与「停用代理」「换邮箱」的处置策略 |
+| **凭证完整落库** | 保存 `access_token` / `refresh_token` / **原始 session JSON**，多账号批量导出 |
+| **配置全部后端化** | 表单偏好、主题、代理池、Remail 订单全在 SQLite，换机器、清缓存后依然保留 |
+| **Docker 部署** | 多阶段构建，最终镜像约 330MB，数据目录外置，容器重建不丢数据 |
 
-含轻量级 **WebUI**：批量导入号池、可视化触发注册、实时 SSE 日志、凭证一键复制。
-**邮箱来源支持双模式**：Outlook 接码池 + CF Worker 自建 catch-all（`cloudflare_temp_email`）。
-不含支付、daemon、Camoufox、Playwright。
+## 快速开始
 
-## 📰 最近更新（2026-07）
+### Docker 运行（推荐）
 
-- 📱 **SMS 接码集成（解决 add-phone 拿不到 refresh_token 的问题）**
-  - 新增 **HeroSMS** 平台支持（sms-activate 协议系，与 SmsBower 共用同一套代码）
-  - 国家列表改为**动态获取**（查询平台 API 实际库存，切换平台自动刷新）
-  - 「📱 接码配置」Tab 一键启用 SmsBower / HeroSMS 平台
-  - 命中 `add-phone` 时自动租号 → 接 SMS → 验证，**全程无人值守**
-  - 支持 **自动选最优国家**（按价格 + 库存）
-  - WebUI 提供「测试余额」「查询国家排名」按钮
-  - 兼容旧的 `OPENAI_PHONE_NUMBER` / `OPENAI_PHONE_OTP` 环境变量路径（未启用接码时自动回退）
-- ✨ **CF Temp Email 自建邮箱支持**
-  - 「📧 邮箱配置」Tab 切换邮箱来源（outlook / cf_temp）
-  - 支持 `dreamhunter2333/cloudflare_temp_email` 部署的 Worker
-  - CF 模式下不需要 outlook 接码号，注册时随机生成 catch-all 邮箱
-  - 内置 `/admin/new_address` + `/admin/mails` 接口对接 + Bot Fight Mode 绕过
-- 🔄 **账号重置功能**：done/failed 状态的号一键重置回 available；支持批量勾选重置
-- 🚀 **多 worker 并发**（1-20）+ 代理池 round-robin：auto-loop 改成多线程，每个 worker 独立代理
-- 🩺 **错误分类 + 熔断**：网络错误自动 release 号；连续 3 次网络错误自动暂停 + 红色横幅
-- 📦 **批量操作**：批量删除号池/凭证 + 按状态批量删
-- ✅ **session_token 三路兜底**：cookie / JSON / domain-free，新号也能拿到
+```bash
+git clone https://github.com/Regert888/gpt-outlook-register.git
+cd gpt-outlook-register
+docker compose up -d --build
+```
 
-## 🎀 两种使用方式
+- Web 面板：`http://服务器IP:8765`
+- 数据目录：`./data`（挂载到容器 `/app/data`），内含 `webui.db` 与 `logs/`
 
-### A. WebUI 模式（推荐，可视化）
+> ⚠️ **容器内代理地址**：容器里的 `127.0.0.1` 指的是容器自己，不是宿主机。
+> 要用宿主机上的代理，填 `host.docker.internal:<端口>`；compose 已配置 `host-gateway`，
+> Linux 下也能解析。宿主机代理软件若只监听 `127.0.0.1`，容器连不上——需改成监听 `0.0.0.0`。
 
-#### 全新安装
+更新到新版本：
+
+```bash
+cd gpt-outlook-register
+git pull
+docker compose up -d --build
+```
+
+`./data` 在宿主机上，`git pull` 与容器重建都不会丢数据。
+
+### 本地运行
+
 ```bash
 git clone https://github.com/Regert888/gpt-outlook-register.git
 cd gpt-outlook-register
@@ -45,120 +59,149 @@ python start_webui.py
 # 浏览器自动打开 http://127.0.0.1:8765/
 ```
 
-**公网启动**：
+公网启动：
+
 ```bash
 python start_webui.py --host 0.0.0.0 --port 8765
 ```
 
-#### Linux 服务器后台运行（24 小时不停）
-
-**推荐使用 screen 后台运行**，关闭 SSH 后进程不会被杀掉：
+**Linux 服务器后台运行**（推荐 `screen`，关 SSH 不杀进程）：
 
 ```bash
-# 1. 安装 screen（如果没有）
-apt install -y screen   # Debian/Ubuntu
-# yum install -y screen  # CentOS/RHEL
-
-# 2. 创建 screen 会话
+apt install -y screen        # CentOS/RHEL: yum install -y screen
 screen -S webui
-
-# 3. 启动 WebUI（公网访问）
 python start_webui.py --host 0.0.0.0 --port 8765
-
-# 4. 看到启动成功后，按 Ctrl+A 再按 D 离开
-#    （进程继续在后台运行）
-
-# 5. 浏览器访问
-#    http://服务器公网IP:8765
-
-# --- 常用命令 ---
-# 重新连接到 screen（查看日志）
-screen -r webui
-
-# 查看所有 screen 会话
-screen -ls
-
-# 停止 WebUI（在 screen 里按 Ctrl+C）
+# 按 Ctrl+A 再按 D 离开，进程继续运行
+# 重新进入：screen -r webui
 ```
 
-**重要提示**：
-- 需要先安装 Node.js（≥18）才能正常收到 OTP 邮件，否则会卡在验证码等待：
-  ```bash
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-  sudo apt-get install -y nodejs
-  node --version  # 验证 >= 18
-  ```
+> ⚠️ **必须装 Node.js（≥18）**。纯 Python 路径只能过 Sentinel `/req` 表层校验，
+> OpenAI 服务端跑真 `sdk.js` 深层校验时会判定为非浏览器 → **OTP 邮件 silent-drop**
+> （HTTP 200 但不下发验证码）。要稳定收到验证码，**强烈建议装 node**。
 
-#### 已有项目，安全升级（不丢数据）
+```bash
+# Ubuntu/Debian
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+sudo apt-get install -y nodejs
+node --version  # 需要 >= 18
+```
+
+### 已有项目安全升级
+
 ```bash
 cd gpt-outlook-register
 
 # 1. 🔴 备份数据库（重要！）
-cp webui/webui.db webui/webui.db.backup
-# Windows 用户也可以手动复制 webui\webui.db 到别的地方
+cp data/webui.db data/webui.db.backup
 
 # 2. 拉取最新代码
 git pull
 
-# 3. 重启 webui
+# 3. 重启
 python start_webui.py
 ```
 
-**说明**：
-- `webui.db` 已在 `.gitignore`，`git pull` **不会覆盖或删除**它
-- 新版本会自动执行 DB migration（添加新表），**不会删除**已有数据
-- 如果担心出问题，先 `cp webui.db webui.db.backup` 备份
+数据库在 `data/` 下（Docker 部署）或 `webui/webui.db`（源码运行），已在 `.gitignore` 中，
+`git pull` 不会覆盖或删除。新版本会自动执行 migration，**不会删除**已有数据。
 
----
+## WebUI 菜单总览
 
-WebUI 提供：
-- 📥 批量粘贴 4 段格式 → 一键入库
-- 📋 号池列表 + 状态过滤（available/in_use/done/failed）
-- ✅ 凭证勾选：`session_token` / `refresh_token` 用户可选
-- ▶️ 一键触发注册，实时 SSE 日志（彩色分级）
-- 📤 注册结果表 + 凭证 JSON 复制按钮
+| 分组 | 菜单 | 路径 | 说明 |
+|---|---|---|---|
+| 概览 | 仪表盘 | `/` | 号池统计与快捷入口 |
+| 注册 | 导入邮箱 | `/import` | 批量粘贴邮箱 4 段格式入库 |
+| 注册 | 单次注册 | `/register` | 可视化触发单次注册，SSE 实时日志 |
+| 注册 | 全自动批量 | `/auto` | 多 worker 并发循环 |
+| 注册 | **代理池** | `/proxy` | 代理管理、类型标记、配额、IPv6 检测 |
+| 数据 | 邮箱列表 | `/pool` | 号池状态管理 |
+| 数据 | **Remail 服务** | `/mails` | Remail 订单管理 |
+| 数据 | 注册结果 | `/registered` | 凭证复制与批量导出 |
+| 数据 | 运行记录 | `/runs` | 历史运行日志 |
+| 配置 | 邮箱配置 | `/settings/mail` | 邮箱来源切换与 provider 配置 |
+| 配置 | 接码配置 | `/settings/sms` | SMS 接码平台配置 |
+| 配置 | 自动导出 | `/settings/export` | 导出目标与格式配置 |
 
-### B. 命令行模式（单号注册）
-```bash
-python register_outlook.py 'email----password----client_id----refresh_token'
-```
+> ⚠️ 所有界面数据都存后端 SQLite（`settings.prefs` / `proxy_pool` / `remail_orders`），
+> 不再依赖浏览器 localStorage —— 换机器、清缓存后依然保留。
+
+## 邮箱来源
+
+WebUI「⚙️ 设置 → 邮箱配置」里下拉切换，后端 provider 声明配置项，前端动态渲染。
+
+| 来源 | 说明 | 适用场景 |
+|---|---|---|
+| **Remail** | 商业邮箱 API，按项目下单取件 | 有 API Key 与项目 ID，最省事 |
+| **Outlook 接码池** | IMAP XOAUTH2 取 OTP（4 段格式导入） | 手上已有微软邮箱接码号 |
+| **CF 自建邮箱** | `dreamhunter2333/cloudflare_temp_email` 兼容 | 自建 catch-all，不用买号 |
+| **iCloud 中继** | 隐藏邮箱中继 | iCloud 隐藏邮件地址 |
+
+### Remail 邮箱服务
+
+「Remail 服务」菜单（`/mails`）提供完整的订单管理界面。
+
+**配置项**（邮箱配置页填写）：
+
+| 配置项 | 说明 |
+|---|---|
+| `remail_api_key` | API Key（oauth2 key） |
+| `remail_project_id` | 项目 ID |
+| `remail_email_suffix` | 邮箱后缀，自由输入（如 `outlook`） |
+| `remail_service_mode` | 服务模式：`purchase`（长效）/ `code`（短效） |
+| `remail_supply_policy` | 库存策略：`private_first`（优先自有库存）/ `public_only`（仅公共库存） |
+
+**长效 vs 短效的关键差异**：
+
+| | 长效（purchase） | 短效（code） |
+|---|---|---|
+| 收件次数 | 可重复收（实测 2 封） | **只投递 1 封** |
+| 注册流程 | 正常设密码 + 收码 | **跳过设密码**，用服务端首次 OTP |
+| 订单状态 | 保持 `active` | 用尽后置为 `consumed` |
+| 复用 | 失败可复用，上限 10 次 | 不复用（`mail_limited` 分类） |
+
+> ⚠️ 短效邮箱**不能设密码**：设密码会让服务端切到 `email_otp_send` 页，
+> 提交邮箱时自动发的那封 OTP 立即失效，而短效邮箱只保留 1 封邮件，补发收不到 → 死锁。
+> 因此短效模式全程只收 1 封验证码，账号没有密码。
+
+**订单复用条件**（长效订单，未关联账号时）：`purchase` 模式 + 无 token 关联 + 有 serviceToken + 状态有效 + 后缀/项目匹配 + 尝试次数 < 10。
 
 ## 代理池
-| 推荐代理服务 | 简介说明 |
-| ---- | ---- |
-| <a href="https://www.ipwo.net/?ref=githubgptautoregister"><img src="https://github.com/Regert888/gpt-auto-register/raw/main/assets/ipwo-banner.png" width="140"></a> | [IPWO 住宅代理](https://www.ipwo.net/?ref=githubgptautoregister) 覆盖 195+ 个国家和地区，支持 HTTP(S) / SOCKS5 协议及灵活的代理配置，为自动化开发与合规网络测试提供多地区网络连接选择。提供动态住宅代理、静态住宅代理、不限量住宅代理等方案，[注册可以领2GB动态代理无门槛免费测试](https://www.ipwo.net/?ref=githubgptautoregister)。90折扣码：`0200` |
 
+「代理池」菜单（`/proxy`）。
 
-
-
-
-## 文件清单
-
-### 核心库（命令行 + WebUI 共用）
-| 文件 | 行数 | 作用 |
-|---|---|---|
-| `register_outlook.py` | ~100 | **命令行入口**：4 段格式 → `AuthFlow.run_register` → 写出账号 JSON |
-| `auth_flow.py` | ~2790 | **纯协议核心**：csrf → authorize → sentinel → signup → otp → create_account → callback → token exchange |
-| `mail_outlook.py` | ~300 | Outlook IMAP XOAUTH2 取 OTP（refresh_token 续期 + 多 folder + tm1 影子过滤） |
-| `mail_cf.py` | ~260 | CF Worker 自建邮箱 Provider（`cloudflare_temp_email` 兼容；OTP 抽取防误判：HTML span 优先 + 排除邮箱/时间戳/hex 颜色） |
-| `sentinel.py` | ~290 | OpenAI Sentinel Token 纯 Python PoW（FNV-1a 32-bit） |
-| `sentinel_quickjs.py` | ~270 | Sentinel Token QuickJS 路径（跑 OpenAI sdk.js，需要 node） |
-| `openai_sentinel_quickjs.js` | ~400 | QuickJS 路径用的 sdk.js wrapper |
-| `sms_provider.py` | ~700 | **SMS 接码 provider**：BaseSmsProvider + SmsActivate / HeroSMS / SmsBower + PhoneCallbackController |
-| `http_client.py` | ~70 | `curl_cffi` Chrome136 TLS 指纹包装 |
-| `config.py` | ~15 | 极简 Config（只留 `proxy` 字段） |
-
-### WebUI（可选）
-| 文件 | 作用 |
+| 能力 | 说明 |
 |---|---|
-| `start_webui.py` | 一键启动脚本（自动装依赖 + 打开浏览器） |
-| `webui/app.py` | FastAPI 主程序（路由 + SSE 流式日志） |
-| `webui/db.py` | SQLite 号池 + 注册结果存储 |
-| `webui/registrar.py` | 注册任务 worker（独立线程 + 日志回调） |
-| `webui/static/index.html` | 单页 SPA |
-| `webui/static/style.css` | 粉色清爽样式 ~ |
-| `webui/static/app.js` | 前端交互 + SSE 接收 |
-| `requirements.txt` | Python 依赖（含 fastapi/uvicorn） |
+| 类型区分 | `static`（固定出口 IP）/ `dynamic`（每次连接换 IP） |
+| 配额上限 | 单代理成功注册数上限，默认 50，`0` = 不限 |
+| CF 拦截处理 | **静态**代理连续被 403 两次 → 自动停用；**动态**代理只计数不停用（换 IP 可能就通过） |
+| IPv6 检测 | 访问 `cloudflare.com/cdn-cgi/trace` 判断出口是否为 IPv6 |
+| 并发安全 | 选中即预占配额，失败归还，避免多 worker 抢同一代理 |
+| 异常释放 | 账号删除/标注异常时自动释放其占用的配额 |
+
+> ⚠️ **动态代理的注意事项**：注册链路跨 `chatgpt.com` 与 `auth.openai.com` 两个域名，
+> 是两条独立隧道，纯随机轮换的动态代理会让「种 cookie 的 IP」与「提交注册的 IP」不一致，
+> 极易触发 409 `invalid_state` 与风控。**建议使用粘性会话（sticky session）代理**——
+> 让一次注册全程固定同一个出口 IP。
+
+## 导出格式
+
+「导出配置」菜单可选择格式，批量导出多账号。
+
+| 格式 | 文件名 | 说明 |
+|---|---|---|
+| `access_token` | `AT` | 仅 access_token |
+| 邮箱----密码 | `账号密码.txt` | 基础账号信息 |
+| 邮箱----密码----2FA | `账号密码2FA.txt` | 含 2FA secret（**仅下发一次，取不回**） |
+| 邮箱----密码----2FA----取件url | `账号密码2FA取件url.txt` | 含取件链接（等同收件权限） |
+| **access_token----代理** | `AT_代理.txt` | **直供 chatgpt2api 导入**，让注册与使用同一个 IP |
+| **原始 session JSON** | `session_json.txt` | `/api/auth/session` 完整响应，一行一个，含 token 与 expires |
+
+「已注册账号」页每个账号都有独立的**复制原始 session_json** 按钮。
+> ⚠️ 存量账号没有 `session_json`（该功能后加），按钮会禁用。
+
+## 配套：chatgpt2api
+
+把 `access_token----代理` 导出结果直接粘进 [chatgpt2api](https://github.com/qll-yin/chatgpt2api)
+的「号池管理 → 导入账号 → Access Token」，即可让每个账号在注册和使用阶段走同一 IP。
 
 ## 完整协议链路
 
@@ -171,65 +214,43 @@ register_outlook.py
             ├── [4/10] POST sentinel.openai.com/backend-api/sentinel/req    → sentinel_token (PoW)
             ├── [5/10] POST auth.openai.com/api/accounts/authorize/continue → 判定 signup vs 已有账号
             │           (screen_hint=signup, openai-sentinel-token=...)
-            ├── [5.5]  POST auth.openai.com/api/accounts/user/register      → 注册密码
+            ├── [5.5]  POST auth.openai.com/api/accounts/user/register      → 注册密码（短效邮箱跳过）
             ├── [6/10] GET  auth.openai.com/api/accounts/email-otp/send     → 触发 OTP 邮件
             │           或 POST .../passwordless/send-otp
             │           或 POST .../email-otp/resend
-            ├── mail_provider.wait_for_otp() ←──── IMAP XOAUTH2 拉 outlook OTP
+            ├── mail_provider.wait_for_otp() ←──── 拉取 OTP
             ├── [7/10] POST auth.openai.com/api/accounts/email-otp/validate → 验证 OTP
             ├── [8/10] POST auth.openai.com/api/accounts/create_account     → 填 name/birthdate
             ├── [9/10] follow_redirect_chain()                              → 抓 callback URL (含 code)
-            ├── [10/10] GET chatgpt.com/api/auth/session                    → access_token + cookies
+            ├── [10/10] GET chatgpt.com/api/auth/session                    → access_token + 完整 session JSON
             └── [可选] POST auth.openai.com/oauth/token (Codex PKCE)        → refresh_token
 ```
 
-## Outlook 4 段接码格式
+**409 `invalid_state` 自动重试**：最多 3 次尝试，命中 409 时重建 session、换出口 IP 并**复用原邮箱**（邮箱已付费，不额外花钱）。被 CF 403 拦截归类为 `cf_blocked`，只换代理，不触发整批熔断。
+
+## 命令行模式（单号注册）
+
+```bash
+python register_outlook.py 'email----password----client_id----refresh_token'
+```
+
+Outlook 4 段接码格式：
 
 ```
 email----password----client_id----microsoft_refresh_token
 ```
 
 例：
+
 ```
 charles@outlook.jp----<pwd>----9e5f94bc-e8a4-...----M.C538_BAY.0.U.-Cs...
 ```
 
 > `client_id` 必须具备 v2 endpoint 的 `https://outlook.office.com/IMAP.AccessAsUser.All offline_access` scope。
-> 实测 supplier 卖的接码号若用 Thunderbird client_id Device Code Flow 重拿的 refresh_token 才有 IMAP scope。
-
-## 安装
-
-```bash
-pip install -r requirements.txt
-```
-
-**可选**：装 Node.js（≥18）启用 QuickJS sentinel 路径——纯 Python 路径只能过 sentinel `/req` 表层校验，
-OpenAI 服务端跑真 sdk.js 深层校验时会判定为非浏览器 → OTP 邮件 silent-drop（200 OK 但不下发）。
-要真稳定收到 OTP 邮件，**强烈建议装 node**。
-
-```bash
-# Ubuntu/Debian
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt-get install -y nodejs
-
-# 验证
-node --version  # 需要 >= 18
-```
-
-## 使用
-
-### 1. 单跑 OTP 取码（确认 outlook 接码号能用）
-```bash
-python mail_outlook.py 'email----password----client_id----refresh_token'
-# → OTP: 123456  (需要 OpenAI 已发过码进该邮箱)
-```
-
-### 2. 完整纯协议注册
-```bash
-python register_outlook.py 'email----password----client_id----refresh_token'
-```
+> 实测供应商卖的接码号若用 Thunderbird client_id 通过 Device Code Flow 重拿的 refresh_token 才有 IMAP scope。
 
 成功输出 `account_<email>.json`：
+
 ```json
 {
   "email": "...",
@@ -244,11 +265,49 @@ python register_outlook.py 'email----password----client_id----refresh_token'
 }
 ```
 
+### 单独测试取码
+
+```bash
+python mail_outlook.py 'email----password----client_id----refresh_token'
+# → OTP: 123456  （需要 OpenAI 已发过码进该邮箱）
+```
+
+## SMS 接码集成
+
+OpenAI 注册有概率被风控跳到 `add-phone` 步骤，**不绑手机号就拿不到 refresh_token**。
+WebUI「📱 接码配置」Tab 启用后，命中 add-phone 会自动租号 + 等 SMS + 自动验证。
+
+| 平台 | 网址 | 特色 |
+|---|---|---|
+| **SmsBower** | smsbower.page | V2 API + auto-resend |
+| **HeroSMS** | hero-sms.com | 180+ 国家，SMS-Activate 继任平台 |
+
+配置步骤：注册平台账号 → 充值 → 拿 API Key → WebUI「📱 接码配置」填 API Key + 选国家 → 保存 → 点「测试余额」确认连通。
+
+| 配置项 | 说明 |
+|---|---|
+| `sms_enabled` | 总开关；关闭时回退到 `OPENAI_PHONE_NUMBER` 环境变量路径 |
+| `sms_provider` | herosms / smsbower / sms_activate |
+| `sms_country` | 国家代码或 ID，默认 `52`（Thailand） |
+| `sms_service` | OpenAI = `dr` |
+| `sms_max_price` | 单号最高价格 |
+| `sms_reuse_phone` | 同号复用 |
+| `sms_phone_success_max` | 同号最多复用 N 次 |
+| `sms_auto_country` | 自动选最优国家（限白名单） |
+
+> ⚠️ **WhatsApp vs SMS**：OpenAI 自 2025 年起对大部分国家改用 WhatsApp 验证。
+> 纯 SMS 路径目前**只有泰国（country_id=52）确认可用**，其它国家可能抽到 WhatsApp 号导致收不到 SMS → 超时 → 退款。
+> 自动选国家时会优先挑 OpenAI-SMS 白名单内的国家，非白名单会给出警告（不阻止）。
+
+> ⚠️ **refresh_token 开关与接码联动**：WebUI 的「获取 refresh_token」开关默认**关闭**。
+> 关闭时只打印日志不发起 Codex OAuth。短效邮箱只保留 1 封邮件，
+> 开启 Codex 链会触发**第二次收件**并偷走唯一的收件机会——已加行为层拦截兜底。
+
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PROXY` | - | 出口代理 URL，例 `socks5://user:pass@host:port`（curl_cffi 会自动 socks5→socks5h） |
+| `PROXY` | - | 出口代理 URL，例 `socks5://user:pass@host:port`（curl_cffi 自动 socks5→socks5h） |
 | `OTP_TIMEOUT` | `60` | OTP 等待秒数（实际下限 30） |
 | `WEBUI_ALLOW_LOGIN` | `0` | `1`=邮箱被识为已注册时走 OTP login；`0`=fast-fail 抛错 |
 | `SKIP_OAUTH_TOKEN_EXCHANGE` | `0` | `1`=跳过 OAuth refresh_token 交换 |
@@ -262,73 +321,102 @@ python register_outlook.py 'email----password----client_id----refresh_token'
 | `OPENAI_PHONE_OTP` | - | 静态 OTP 验证码（调试用，6 位数字） |
 | `OPENAI_PHONE_OTP_CMD` | - | 动态获取手机 OTP 的 shell 命令（stdout 含 6 位数字即命中） |
 | `OPENAI_PHONE_OTP_TIMEOUT` | `180` | add-phone 等 SMS 超时（秒） |
+| `WEBUI_DB_PATH` | `data/webui.db` | SQLite 路径（Docker 里为 `/app/data/webui.db`） |
+| `WEBUI_LOG_DIR` | `data/logs` | 运行日志目录（Docker 里为 `/app/data/logs`） |
 
-## 📱 SMS 接码集成
+## 文件清单
 
-OpenAI 注册有概率被风控跳到 `add-phone` 步骤，**不绑手机号就拿不到 refresh_token**。
-WebUI「📱 接码配置」Tab 启用接码后，命中 add-phone 时会自动租号 + 等 SMS + 自动验证。
+### 核心库（命令行 + WebUI 共用）
 
-### 支持的平台
-
-| 平台 | 网址 | 特色 |
-|---|---|---|
-| **SmsBower** | smsbower.page | V2 API + auto-resend |
-| **HeroSMS** | hero-sms.com | 180+ 国家，SMS-Activate 继任平台 |
-
-
-
-
-### 使用步骤
-
-1. 注册平台账号 + 充值 + 拿 API Key
-2. WebUI →「📱 接码配置」→ 启用 + 填 API Key + 选国家（默认 52 = Thailand）→ 保存
-3. 点「测试余额」确认连通
-4. 正常触发注册，命中 add-phone 时会自动租号，日志里能看到 `📱 准备租号` / `✅ 已租到号码` / `⏳ 等待 SMS 验证码` / `🎉 已标记号码成功完成`
-
-### 配置项说明
-
-| 配置项 | 说明 |
+| 文件 | 作用 |
 |---|---|
-| `sms_enabled` | 总开关；关闭时回退到 `OPENAI_PHONE_NUMBER` 环境变量路径 |
-| `sms_provider` | herosms / smsbower / sms_activate |
-| `sms_country` | 国家代码或 ID，默认 `52`（Thailand） |
-| `sms_service` | OpenAI = `dr` |
-| `sms_max_price` | 单号最高价格（HeroSMS / SmsBower 用，平台货币单位） |
-| `sms_reuse_phone` | 同号复用（HeroSMS / SmsBower） |
-| `sms_phone_success_max` | 同号最多复用 N 次 |
-| `sms_auto_country` | 自动选最优国家（限白名单） |
+| `register_outlook.py` | **命令行入口**：4 段格式 → `AuthFlow.run_register` → 写出账号 JSON |
+| `auth_flow.py` | **纯协议核心**：csrf → authorize → sentinel → signup → otp → create_account → callback → token exchange |
+| `http_client.py` | `curl_cffi` Chrome136 TLS 指纹包装（失败自动降级 chrome124 / chrome120） |
+| `config.py` | 极简 Config（只留 `proxy` 字段） |
+| `sentinel.py` | OpenAI Sentinel Token 纯 Python PoW（FNV-1a 32-bit） |
+| `sentinel_quickjs.py` | Sentinel Token QuickJS 路径（跑 OpenAI sdk.js，需要 node） |
+| `openai_sentinel_quickjs.js` | QuickJS 路径用的 sdk.js wrapper |
+| `sms_provider.py` | **SMS 接码 provider**：BaseSmsProvider + SmsActivate / HeroSMS / SmsBower + PhoneCallbackController |
 
+### 邮箱 Provider（`mail_providers/`）
+
+| 文件 | 作用 |
+|---|---|
+| `base.py` | Provider 基类：配置声明、错误分类、`wait_for_otp(earliest=...)` 统一取件接口 |
+| `remail.py` | **Remail 商业邮箱 API**：下单 / 取件 / 自检 / 长效订单复用 / 短效单次取码 |
+| `outlook.py` | Outlook IMAP XOAUTH2 取 OTP（refresh_token 续期 + 多 folder + tm1 影子过滤） |
+| `cf_temp.py` | CF Worker 自建邮箱（`cloudflare_temp_email` 兼容；OTP 抽取防误判） |
+| `icloud_relay.py` | iCloud 隐藏邮箱中继 |
+
+> 根目录的 `mail_outlook.py` / `mail_cf.py` 是**兼容转发壳**（实现已迁到 `mail_providers/`），
+> 仅保留旧 import 路径可用，新代码请用 `create_mail_provider(kind, ...)`。
+
+### WebUI
+
+| 文件 | 作用 |
+|---|---|
+| `start_webui.py` | 一键启动脚本（自动装依赖 + 打开浏览器） |
+| `webui/app.py` | FastAPI 主程序（路由 + SSE 流式日志） |
+| `webui/db.py` | SQLite：号池 / 注册结果 / **代理池** / **Remail 订单** / 偏好设置 |
+| `webui/registrar.py` | 注册任务 worker（独立线程 + 日志回调 + 错误分类 + 订单关联） |
+| `webui/auto_loop.py` | 全自动循环（多 worker、动态挑代理、CF 分类、熔断） |
+| `webui/export_formats.py` | 多格式批量导出定义 |
+| `webui/frontend/` | Vue 3 + Element Plus 前端源码 |
+
+## 技术细节
 
 ### Sentinel Token 深层校验
+
 - **纯 Python sentinel**：`/sentinel/req` 返 200 OK，`/authorize/continue` 也返 200 OK，
-  但 OpenAI 服务端做 OTP 派发前会跑**真 sdk.js**校验 token，纯 Python PoW 会被判为非浏览器 → 邮件 silent-drop。
+  但 OpenAI 服务端做 OTP 派发前会跑**真 sdk.js** 校验 token，纯 Python PoW 会被判为非浏览器 → 邮件 silent-drop。
 - **QuickJS sentinel（默认启用）**：跑 OpenAI 真 `sdk.js`（自动下载缓存到 `/tmp/openai-sentinel-demo/<ver>/sdk.js`），返回真实浏览器同款 token，OTP 派发正常。
 - 没装 node 也能跑，但只能用于纯协议探测，**不能真发码**。
 
 ### Outlook 收件细节
-- **Junk 邮件**：首次发码给陌生收件人常被 outlook 反垃圾分到 Junk，本脚本扫多 folder（INBOX / Junk / Junk Email / Spam）。
-- **tm1.openai.com 影子发码**： 当前坏掉的发码域，所有账号都返固定 OTP=493682 → verify 401。已硬过滤。
-- **refresh_token 自动滚动续期**：Microsoft access_token 1 天有效，本模块每 3000s 自动续期。
 
+- **Junk 邮件**：首次发码给陌生收件人常被 Outlook 反垃圾分到 Junk，脚本扫多 folder（INBOX / Junk / Junk Email / Spam）。
+- **tm1.openai.com 影子发码**：当前坏掉的发码域，所有账号都返固定 OTP=493682 → verify 401。已硬过滤。
+- **refresh_token 自动滚动续期**：Microsoft access_token 1 天有效，模块每 3000s 自动续期。
 
+### OpenAI 反欺诈
+
+- **已有账号分支**：邮箱被识为已注册时，默认 fast-fail 抛错（防 honeypot）。
+  设 `WEBUI_ALLOW_LOGIN=1` 改走 OTP login 拿凭证。
+- **`authorize/continue` 已 trigger 发码**：passwordless 模式下 OpenAI 已经发了码，
+  此时**必须只 resend**，不能再调 `email-otp/send`（会新建 challenge → 旧 OTP 失效 → `wrong_email_otp_code`）。
+  代码里的 `kickoff_otp_delivery` 已根据 `_is_existing_account` 自动切分支。
+- **批量注册次日存活率约 2%**（原项目反欺诈研究数据），单号 / 偶发使用没问题。
+- **409 `invalid_state`**：同一条链路重复触发的信号，会重建 session、换出口 IP 并复用原邮箱重试（最多 3 次）。
 
 ### 网络层
-- **curl_cffi SOCKS5**：默认会把 `socks5://` 规范化成 `socks5h://`（DNS 走代理解析），减少 TLS 握手异常。
-- **TLS 指纹**：默认 `chrome136`；TLS 握手失败时会自动尝试 `chrome124` / `chrome120` 兜底。
+
+- **curl_cffi SOCKS5**：默认把 `socks5://` 规范化成 `socks5h://`（DNS 走代理解析），减少 TLS 握手异常。
+- **TLS 指纹**：默认 `chrome136`；握手失败自动尝试 `chrome124` / `chrome120` 兜底。
 - **Cloudflare 403**：`get_csrf_token` 内置 3 次重试 + 指数 backoff。
 
-### SMS 接码
-- **HeroSMS 退款机制**：HeroSMS 购买后 2 分钟内不可取消，取消后 20 分钟自动退款到余额；SmsBower 可立即取消退款。注册机中号码不可用时会立刻换号，HeroSMS 的废号等 20 分钟后自动退回。
-- **OTP validate 失败 → resend 兜底**：phone-otp/validate 401 时会自动 resend 一次再等新码。
+### SMS 接码退款
+
+HeroSMS 购买后 2 分钟内不可取消，取消后 20 分钟自动退款到余额；SmsBower 可立即取消退款。号码不可用时立刻换号，HeroSMS 的废号等 20 分钟后自动退回。
+
+OTP validate 失败（phone-otp/validate 401）时自动 resend 一次再等新码。
+
+## 测试
+
+```bash
+python test_integration.py
+python test_remail_provider.py
+python test_ui_fixes.py
+```
+
+测试使用独立的临时数据库，**不会污染生产库**。
 
 ## License
 
 本项目采用 **AGPL-3.0** 许可证，完整条款见 [LICENSE](LICENSE)。
 
 - **个人学习和研究**：可自由使用。
-- **二次开发**：衍生作品须以相同许可证**开源**，
-  并保留原作者署名和本项目地址 <https://github.com/Regert888/gpt-outlook-register>。
-- **AGPL 特有条款**：通过网络提供服务（例如把本项目的 WebUI 架在服务器上给别人用）
-  同样视为分发，**必须向使用者提供对应的完整源码**。
+- **二次开发**：衍生作品须以相同许可证**开源**，并保留原作者署名和本项目地址 <https://github.com/Regert888/gpt-outlook-register>。
+- **AGPL 特有条款**：通过网络提供服务（例如把本项目 WebUI 架在服务器上给别人用）同样视为分发，**必须向使用者提供对应的完整源码**。
 
 二次开发欢迎，但请带上出处，谢谢。
