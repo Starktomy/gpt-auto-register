@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+
+# Node
+node_modules
+webui/frontend/node_modules
+
+# ⚠️ 数据不要进镜像 —— 挂载出去更安全，也避免镜像层里留一份凭证
+data/
+webui/webui.db
+webui/webui.db-shm
+webui/webui.db-wal
+webui/logs/
+
+# 前端构建产物（镜像里会重新 build）
+webui/static/
+
+# 编辑器
+.idea
+.vscode
+
+# 文档
+README.md
+docs/

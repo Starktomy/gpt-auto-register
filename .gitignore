@@ -17,6 +17,16 @@ account_*.json
 *.session
 *.token
 
+# ⚠️ Docker 部署的数据目录（2026-11-04 补）
+#    容器里 WEBUI_DB_PATH=/app/data/webui.db、WEBUI_LOG_DIR=/app/data/logs，
+#    宿主机上就是 ./data/。里面有号池、access_token、Remail 的 serviceToken
+#    和带密码的运行日志 —— **绝对不能推到 GitHub**。
+#    ⚠️ 注意：空目录 git 本来就不跟踪，光靠"没文件就不显示"是不够的，
+#    容器跑起来写入 webui.db 后它就会变成待提交文件。
+data/
+*.db
+!webui/frontend/**/*.db
+
 # Outlook 4 段格式接码号（如果主人手动放过）
 mail.txt
 accounts.txt

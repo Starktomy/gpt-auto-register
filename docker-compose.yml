@@ -1,0 +1,41 @@
+services:
+  app:
+    # 本地编译部署（不用预构建镜像 —— 这个项目有本地改动，预构建镜像里没有）
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gpt-outlook-register:local
+    container_name: gpt-outlook-register
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      # 数据持久化：号池 / 注册凭证 / Remail 订单 / 代理池全在这个库里。
+      # 容器重建不丢 —— 换句话说，代理的用量计数、Remail 订单的复用次数都靠它。
+      - ./data:/app/data
+    environment:
+      # DB 和日志的位置（对应上面的挂载）
+      WEBUI_DB_PATH: /app/data/webui.db
+      WEBUI_LOG_DIR: /app/data/logs
+
+    # ⚠️ 代理必看：
+    #    容器里的 127.0.0.1 指的是**容器自己**，不是宿主机。
+    #    要用宿主机上的代理，地址必须写 host.docker.internal:<端口>，
+    #    比如宿主机上 Clash 监听 7890 → 代理池里填 host.docker.internal:7890。
+    #    extra_hosts 让这个域名在 Linux 上也能解析到宿主机
+    #    （Docker Desktop 的 Windows/Mac 版默认就有）。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # 容器内时区（影响日志/邮件时间戳显示）
+    TZ: Asia/Shanghai
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 代理池里能用的地址：
+    #   · 容器内的代理（另一个 compose 服务）→ http://<服务名>:<端口>
+    #   · 宿主机的代理                → http://host.docker.internal:<端口>
+    #   · 公网代理                    → 照常填 socks5://user:pass@1.2.3.4:1080
+    #
+    # ⚠️ 如果宿主机代理软件只监听 127.0.0.1，容器**连不上** ——
+    #    需要把代理软件改成监听 0.0.0.0（或在宿主机上做端口转发）。
+    # ─────────────────────────────────────────────────────────────────────
