@@ -23,6 +23,19 @@ const countriesLoading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 
+// 用户在本页**手动改过**的字段。
+// ⚠️ 为什么需要：load() 是异步的（getSmsConfig + loadCountries 两次网络请求），
+//    窗口有几百毫秒。这期间用户点一下"启用 SMS 接码"，load() 回来后
+//    `enabled.value = config.sms_enabled === '1'` 会把用户的选择**冲掉** ——
+//    表现就是"勾了启用，保存后却变成禁用；取消勾选，保存后反而启用"。
+//    所以 load() 只应用用户还没动过的字段。
+const touched = new Set()
+
+// 用户动过开关 → 记下来，之后 load() 不再覆盖这个字段
+function markTouched(key) {
+  touched.add(key)
+}
+
 const countryOptions = computed(() =>
   allCountries.value.map((c) => ({
     value: c.id,
@@ -44,20 +57,23 @@ async function loadCountries(p) {
 async function load() {
   try {
     const { config } = await getSmsConfig()
+    // ⚠️ 先把开关类字段填上，**不要**等到 loadCountries 之后 ——
+    //    loadCountries 是个网络请求，窗口越长越容易被用户操作撞上。
+    // ⚠️ 用户已经动过的字段不覆盖 —— 见文件头 touched 的说明。
+    if (!touched.has('enabled')) enabled.value = config.sms_enabled === '1'
+    if (!touched.has('reusePhone')) reusePhone.value = config.sms_reuse_phone === '1'
     provider.value = config.sms_provider || 'smsbower'
-    await loadCountries(provider.value)
-    enabled.value = config.sms_enabled === '1'
     apiKey.value = ''
     apiKeyPh.value = config.sms_api_key === '***' ? '已设置（留空不修改）' : '粘贴接码平台 API Key'
     service.value = config.sms_service || 'dr'
     maxPrice.value = config.sms_max_price || ''
     fixedPrice.value = config.sms_fixed_price || ''
     phoneSuccessMax.value = config.sms_phone_success_max || '3'
-    reusePhone.value = config.sms_reuse_phone === '1'
     autoMinStock.value = config.sms_auto_min_stock || '20'
     allowed.value = (config.sms_allowed_countries || '').split(',').map((s) => s.trim()).filter(Boolean)
     maxPhoneAttempts.value = config.sms_max_phone_attempts || ''
     perPhoneTimeout.value = config.sms_per_phone_timeout || '80'
+    await loadCountries(provider.value)
   } catch (e) { ElMessage.error(e.message) }
 }
 
@@ -89,7 +105,10 @@ async function save() {
       sms_per_phone_timeout: perPhoneTimeout.value.trim() || '80',
     })
     ElMessage.success('保存成功')
-    setTimeout(load, 300)
+    // ⚠️ 原来这里有 `setTimeout(load, 300)` —— 保存完又重新读一遍后端。
+    //    这会把用户刚保存的值再拉回来覆盖一遍（虽然 touched 保护了开关，
+    //    但其它输入框会被重置成旧值），而且毫无必要：保存的返回值就是最终状态。
+    //    需要刷新国家列表的话，onProviderChange 已经处理了。
   } catch (e) { ElMessage.error(e.message) }
   finally { saving.value = false }
 }
@@ -110,7 +129,7 @@ onActivated(() => load())
 
       <el-form label-position="top">
         <el-form-item>
-          <el-checkbox v-model="enabled">
+          <el-checkbox v-model="enabled" @change="markTouched('enabled')">
             <b>启用 SMS 接码</b>（命中 add-phone 时自动租号，否则回退到环境变量路径）
           </el-checkbox>
         </el-form-item>
@@ -185,7 +204,7 @@ onActivated(() => load())
           </el-col>
         </el-row>
         <el-form-item>
-          <el-checkbox v-model="reusePhone"><b>启用号码复用</b>（gpt风控，号码短时间无法复用）</el-checkbox>
+          <el-checkbox v-model="reusePhone" @change="markTouched('reusePhone')"><b>启用号码复用</b>（gpt风控，号码短时间无法复用）</el-checkbox>
         </el-form-item>
 
         <el-divider content-position="left">失败重试策略</el-divider>
