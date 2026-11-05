@@ -73,7 +73,12 @@ class RegisterReq(BaseModel):
     email: Optional[str] = Field(None, description="留空 = 自动 claim 下一个 available")
     want_access_token: bool = True
     want_session_token: bool = True
-    want_refresh_token: bool = True
+    # ⚠️ 默认 **False**：拿 refresh_token 要跑 Codex OAuth 授权链，而那条链
+    #    可能**再发一封验证码**（auth_flow 的 need_otp 分支）—— 对短效邮箱
+    #    （code 模式，一次性）是致命的。前端两个页面也默认关。
+    #    真实默认值由前端的 wantRefreshToken / autoWantRefreshToken 决定；
+    #    这里的 default 只是「调用方没传这个字段」时的兜底。
+    want_refresh_token: bool = False
     proxy: str = ""
     otp_timeout: int = 10
     allow_existing_login: bool = True
@@ -188,6 +193,30 @@ def api_stats():
     return {"ok": True, "stats": db.stats()}
 
 
+# ──────────────────────── 界面偏好 ────────────────────────
+#
+# 表单默认值（并发数、OTP 等待、2FA 开关…）和主题以前存在各页面的
+# localStorage 里 —— 只跟着这一个浏览器走，换机器/清缓存就没了，后端也看不到。
+# 现在统一收到后端 SQLite，前端启动时拉一次。
+
+
+class PrefsReq(BaseModel):
+    model_config = {"extra": "allow"}
+
+    # 不写死字段：任意 key 都存（前端加新偏好不用改这个模型）
+
+
+@app.get("/api/settings/prefs")
+def api_get_prefs():
+    return {"ok": True, "prefs": db.get_prefs()}
+
+
+@app.post("/api/settings/prefs")
+def api_save_prefs(req: PrefsReq):
+    data = req.model_dump(exclude_none=True)
+    return {"ok": True, "prefs": db.save_prefs(data)}
+
+
 # ──────────────────────── 代理连通性测试 ────────────────────────
 
 
@@ -249,6 +278,170 @@ def api_proxy_test(req: ProxyTestReq):
     return {"ok": True, "results": results}
 
 
+# ──────────────────────── 代理池管理 ────────────────────────
+#
+# 代理池原来只在前端 localStorage（stores/proxy.js，纯字符串数组），
+# 后端拿不到任何元数据 → 既没法限流，也没法在某个代理被风控后自动换走。
+# 现在迁到 SQLite（proxy_pool 表），前端改成调这些接口。
+
+
+class ProxyPoolImportReq(BaseModel):
+    text: str = Field("", description="每行一个代理")
+    mode: str = Field("replace", description="replace=覆盖（保留已有代理的用量）/ append=追加")
+
+
+class ProxyPoolUpdateReq(BaseModel):
+    proxy: str = Field(..., description="代理原文")
+    enabled: Optional[bool] = None
+    max_uses: Optional[int] = Field(None, description="成功注册数上限，0=不限")
+    note: Optional[str] = None
+    # 代理类型：static=固定出口 IP / dynamic=每次请求换 IP。
+    # ⚠️ 被 Cloudflare 403 拦时两者的处置完全不同：
+    #    static → 这个 IP 已被拉黑，连续被拦达阈值就自动停用
+    #    dynamic → 换个出口 IP 可能就通过，不停用只记次数
+    proxy_type: Optional[str] = Field(None, description="static / dynamic")
+
+
+class ProxyPoolResetReq(BaseModel):
+    proxy: Optional[str] = Field(None, description="留空=重置全部")
+
+
+class ProxyIpv6TestReq(BaseModel):
+    proxies: list[str] = Field(default_factory=list, description="要测的代理列表")
+    timeout: int = Field(10, description="单代理超时秒数")
+
+
+@app.get("/api/proxy/pool")
+def api_proxy_pool():
+    return {"ok": True, "items": db.list_proxies(), "stats": db.proxy_pool_stats()}
+
+
+@app.post("/api/proxy/pool")
+def api_proxy_pool_import(req: ProxyPoolImportReq):
+    """批量导入代理。replace 只删掉不在新列表里的，已有代理的用量/启用状态保留。"""
+    mode = "append" if str(req.mode or "").lower() == "append" else "replace"
+    proxies = [p.strip() for p in (req.text or "").splitlines() if p.strip()]
+    result = db.replace_proxies(proxies, mode=mode)
+    return {"ok": True, **result, "stats": db.proxy_pool_stats()}
+
+
+@app.delete("/api/proxy/pool")
+def api_proxy_pool_clear():
+    n = db.clear_proxies()
+    return {"ok": True, "removed": n, "items": db.list_proxies(),
+            "stats": db.proxy_pool_stats()}
+
+
+@app.patch("/api/proxy/pool")
+def api_proxy_pool_update(req: ProxyPoolUpdateReq):
+    """改单个代理的启用状态 / 上限 / 备注 / 类型（静态 or 动态）。"""
+    ok = db.update_proxy(
+        req.proxy, enabled=req.enabled, max_uses=req.max_uses, note=req.note,
+        proxy_type=req.proxy_type,
+    )
+    if not ok:
+        raise HTTPException(404, "代理不存在")
+    return {"ok": True, "items": db.list_proxies(), "stats": db.proxy_pool_stats()}
+
+
+@app.post("/api/proxy/pool/cf_reset")
+def api_proxy_pool_cf_reset(req: ProxyPoolResetReq):
+    """清零 CF 拦截计数（代理换了 IP / 供应商修了之后手动点一下）。"""
+    n = 1 if req.proxy else db.reset_all_proxy_cf_blocked()
+    if req.proxy:
+        db.reset_proxy_cf_blocked(req.proxy)
+    return {"ok": True, "reset": n, "items": db.list_proxies(),
+            "stats": db.proxy_pool_stats()}
+
+
+@app.post("/api/proxy/pool/ipv6_test")
+def api_proxy_pool_ipv6_test(req: ProxyIpv6TestReq):
+    """检测代理池里哪些代理支持 IPv6 出口。
+
+    为什么需要：IPv6 的地址空间比 IPv4 大几个数量级，同一个 /64 段里的
+    "邻居" 少得多 → 被 Cloudflare 按 IP 段批量拉黑的概率低得多。
+    实测日志里 7 次 warmup CF 403 全是 IPv4 出口。
+
+    检测方式：走 cloudflare.com/cdn-cgi/trace，它会同时返回 ip 和 ipv6 两个字段
+    —— ip 是客户端 IPv4，ipv6 是客户端 IPv6。有 ipv6 字段且非空 → 支持。
+    """
+    import sys as _sys
+    ROOT_DIR = Path(__file__).resolve().parents[1]
+    if str(ROOT_DIR) not in _sys.path:
+        _sys.path.insert(0, str(ROOT_DIR))
+    try:
+        from http_client import create_http_session
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"加载 http_client 失败: {e}")
+
+    import re as _re
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+
+    timeout = max(3, min(int(req.timeout or 10), 60))
+    proxies = [p.strip() for p in (req.proxies or []) if p and p.strip()]
+    if not proxies:
+        raise HTTPException(400, "proxies 不能为空")
+
+    def _test_one(proxy: str):
+        t0 = _t.perf_counter()
+        try:
+            sess = create_http_session(proxy=proxy)
+            resp = sess.get("https://cloudflare.com/cdn-cgi/trace", timeout=timeout)
+            latency = int((_t.perf_counter() - t0) * 1000)
+            if resp.status_code != 200:
+                return {
+                    "ok": False, "ipv6": False, "latency_ms": latency,
+                    "error": f"HTTP {resp.status_code}",
+                }
+            text = resp.text or ""
+            ip4 = ""
+            ip6 = ""
+            m4 = _re.search(r"^ip=(.*)$", text, _re.M)
+            m6 = _re.search(r"^ipv6=(.*)$", text, _re.M)
+            if m4:
+                ip4 = m4.group(1).strip()
+            if m6:
+                ip6 = m6.group(1).strip()
+            # 有非空 ipv6 字段 → 该出口支持 IPv6
+            has6 = bool(ip6)
+            return {
+                "ok": True, "ipv6": has6, "latency_ms": latency,
+                "ip": ip4, "ipv6_addr": ip6,
+            }
+        except Exception as e:  # noqa: BLE001
+            latency = int((_t.perf_counter() - t0) * 1000)
+            return {
+                "ok": False, "ipv6": False, "latency_ms": latency,
+                "error": str(e)[:140],
+            }
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(10, len(proxies))) as ex:
+        for proxy, res in zip(proxies, ex.map(_test_one, proxies)):
+            results[proxy] = res
+            # 结果落库，前端表格直接展示
+            db.set_proxy_ipv6_status(proxy, "ok" if res.get("ipv6") else "fail")
+    return {"ok": True, "results": results, "items": db.list_proxies(),
+            "stats": db.proxy_pool_stats()}
+
+
+@app.delete("/api/proxy/pool/{proxy:path}")
+def api_proxy_pool_delete(proxy: str):
+    ok = db.delete_proxy(proxy)
+    if not ok:
+        raise HTTPException(404, "代理不存在")
+    return {"ok": True, "items": db.list_proxies(), "stats": db.proxy_pool_stats()}
+
+
+@app.post("/api/proxy/pool/reset")
+def api_proxy_pool_reset(req: ProxyPoolResetReq):
+    """重置用量计数（不删代理）。"""
+    n = db.reset_proxy_counts(req.proxy)
+    return {"ok": True, "reset": n, "items": db.list_proxies(),
+            "stats": db.proxy_pool_stats()}
+
+
 @app.post("/api/register")
 def api_register(req: RegisterReq):
     """启动注册任务，返回 run_id。前端拿 run_id 去 /api/runs/{run_id}/stream 订阅 SSE。"""
@@ -301,6 +494,16 @@ def api_register(req: RegisterReq):
         "allow_existing_login": req.allow_existing_login,
         "want_2fa": req.want_2fa,
     }
+
+    # 单次注册用的代理是用户手填/手选的，同样要计入池子的配额口径。
+    # 这里预占一格（自动跑号那边是 pick_proxy 预占的），失败时归还。
+    single_proxy = str(req.proxy or "").strip()
+    reserved = False
+    if single_proxy and db.find_proxy(single_proxy):
+        if db.reserve_proxy(single_proxy):
+            reserved = True
+            options["proxy_reserved"] = 1
+
     run_id = registrar.start_registration(account, options)
     logger.info(f"[run] {run_id} -> {account['email']} (mail_source={mail_source})")
     return {"ok": True, "run_id": run_id, "email": account["email"]}
@@ -392,6 +595,23 @@ def api_bulk_delete_registered(req: BulkDeleteRegisteredReq):
         n = db.delete_registered_by_emails(req.emails)
         return {"ok": True, "deleted": n, "by": "emails"}
     raise HTTPException(400, "需要 emails 或 all=true")
+
+
+class MarkAbnormalReq(BaseModel):
+    emails: list[str] = Field(..., description="要标注的账号邮箱列表")
+    abnormal: bool = Field(True, description="True=标注异常，False=取消标注")
+
+
+@app.post("/api/registered/mark_abnormal")
+def api_mark_abnormal(req: MarkAbnormalReq):
+    """标注账号异常（被封 / 额度耗尽 / 不可用）。
+
+    标注异常时会**自动释放该号占用的代理配额** —— 号已经废了，
+    它的 IP 名额应该还回池子里给别的号用。
+    """
+    n = db.mark_registered_abnormal_by_emails(req.emails, req.abnormal)
+    return {"ok": True, "updated": n, "items": db.list_registered(limit=200),
+            "proxy_stats": db.proxy_pool_stats()}
 
 
 # ──────────────────────── 批量导出（文本） ────────────────────────
@@ -532,6 +752,162 @@ def api_test_mail():
     if not result.get("ok"):
         raise HTTPException(500, result.get("message") or "连接失败")
     return {"ok": True, "message": result.get("message", "连接成功")}
+
+
+# ──────────────────────── Remail 订单（邮箱服务） ────────────────────────
+#
+# Remail 不交付账号密码，只交付「邮箱地址 + serviceToken」这一对取件凭证。
+# 下单时全部写进本地 remail_orders 表，这里所有操作都只读本地 —— 不回查
+# Remail 的 projects / orders 接口。
+
+
+@app.get("/api/mail/orders")
+def api_mail_orders(limit: int = 200, offset: int = 0):
+    """本机记录的 Remail 订单列表。"""
+    items = db.list_remail_orders(limit=limit, offset=offset)
+    return {"ok": True, "items": items, "total": len(items)}
+
+
+class RemailOrderReq(BaseModel):
+    suffix: Optional[str] = Field(None, description="邮箱后缀，留空用配置里的默认值")
+    project_id: Optional[int] = Field(None, description="项目 ID，留空用配置里的")
+    service_mode: Optional[str] = Field(None, description="purchase / code")
+    supply_policy: Optional[str] = Field(None, description="private_first / public_only")
+
+
+@app.post("/api/mail/orders")
+def api_create_mail_order(req: RemailOrderReq):
+    """手动下一单（测试用 / 补单）。
+
+    走的是和注册流程完全一样的 provider.create_mailbox()，
+    所以订单会落在同一张表里，行为一致。
+    """
+    try:
+        provider = create_mail_provider("remail", db.get_mail_settings())
+    except Exception as e:
+        raise HTTPException(400, f"构造 Remail provider 失败: {e}")
+
+    # 允许这一单覆盖配置里的后缀 / 项目 / 模式
+    for attr, value in (
+        ("email_suffix", req.suffix),
+        ("project_id", req.project_id),
+        ("service_mode", req.service_mode),
+        ("supply_policy", req.supply_policy),
+    ):
+        if value not in (None, ""):
+            setattr(provider, attr, value)
+
+    try:
+        email = provider.create_mailbox()
+    except Exception as e:
+        raise HTTPException(400, f"下单失败: {e}")
+    return {"ok": True, "email": email, "items": db.list_remail_orders()}
+
+
+@app.get("/api/mail/orders/{order_no}/mails")
+def api_mail_order_mails(order_no: str):
+    """对某个订单取件 —— 这就是「长效订单可以重复收件」的入口。
+
+    订单里的 serviceToken 是取件凭证，这里从本地表读，不回查服务端。
+    """
+    order = db.get_remail_order(order_no, with_token=True)
+    if not order:
+        raise HTTPException(404, "订单不存在")
+    token = order.get("service_token") or ""
+    if not token:
+        raise HTTPException(400, "该订单没有 serviceToken，无法取件")
+
+    try:
+        provider = create_mail_provider("remail", db.get_mail_settings())
+        mails = provider.fetch_mails(order.get("email") or "", token)
+    except Exception as e:
+        raise HTTPException(500, f"取件失败: {e}")
+
+    # 只回必要字段。邮件正文可能很长，前端只展示摘要 + 验证码。
+    items = []
+    for m in mails:
+        items.append({
+            "id": m.get("id"),
+            "sender": m.get("sender") or "",
+            "subject": m.get("subject") or "",
+            "receivedAt": m.get("receivedAt") or "",
+            "verificationCode": m.get("verificationCode") or "",
+            "bodyPreview": (m.get("bodyPreview") or "")[:300],
+        })
+    return {"ok": True, "email": order.get("email") or "", "items": items}
+
+
+class LinkOrderReq(BaseModel):
+    email: str = Field(..., description="关联到的本地账号邮箱")
+
+
+@app.post("/api/mail/orders/{order_no}/link")
+def api_link_mail_order(order_no: str, req: LinkOrderReq):
+    """把订单关联到本地注册成功的账号。"""
+    ok = db.link_remail_order(order_no, req.email)
+    if not ok:
+        raise HTTPException(404, "订单不存在")
+    return {"ok": True, "items": db.list_remail_orders()}
+
+
+class OrderDisabledReq(BaseModel):
+    disabled: bool = Field(True, description="True=禁用，False=启用")
+
+
+@app.post("/api/mail/orders/{order_no}/disabled")
+def api_mail_order_disabled(order_no: str, req: OrderDisabledReq):
+    """本地禁用 / 启用一笔订单。
+
+    禁用的订单不会再被自动复用（但仍然可以手动取件 —— 邮箱还在，钱已经花了）。
+    只改本地标记，不动 Remail 服务端的状态。
+    """
+    ok = db.set_remail_order_disabled(order_no, req.disabled)
+    if not ok:
+        raise HTTPException(404, "订单不存在")
+    return {"ok": True, "items": db.list_remail_orders()}
+
+
+@app.delete("/api/mail/orders/{order_no}")
+def api_delete_mail_order(order_no: str):
+    """删除本地订单记录。
+
+    ⚠️ 只删本地记录，不会去 Remail 退单 —— 退款要走服务端的售后流程。
+    """
+    ok = db.delete_remail_order(order_no)
+    if not ok:
+        raise HTTPException(404, "订单不存在")
+    return {"ok": True, "items": db.list_remail_orders()}
+
+
+class BulkDeleteOrdersReq(BaseModel):
+    order_nos: list[str] = Field(..., description="要删除的订单号列表")
+
+
+@app.post("/api/mail/orders/bulk_delete")
+def api_bulk_delete_mail_orders(req: BulkDeleteOrdersReq):
+    """批量删除本地订单记录。"""
+    n = db.delete_remail_orders(req.order_nos)
+    return {"ok": True, "deleted": n, "items": db.list_remail_orders()}
+
+
+@app.get("/api/mail/wallet")
+def api_mail_wallet():
+    """查 Remail 余额（透传 apikey/profile）。"""
+    try:
+        provider = create_mail_provider("remail", db.get_mail_settings())
+    except Exception as e:
+        raise HTTPException(400, f"构造 Remail provider 失败: {e}")
+    try:
+        resp = provider._request("GET", "/v1/open/apikey/profile", timeout=15)
+    except Exception as e:
+        raise HTTPException(500, f"查询余额失败: {e}")
+    status = getattr(resp, "status_code", 0)
+    if status != 200:
+        raise HTTPException(500, f"查询余额失败: status={status}")
+    data = provider._parse_json(resp)
+    key = data.get("apiKey") if isinstance(data.get("apiKey"), dict) else data
+    return {"ok": True, "balance": str(key.get("balance") or "0"),
+            "enabled": key.get("enabled")}
 
 
 # ──────────────────────── SMS 接码配置 ────────────────────────
@@ -999,7 +1375,12 @@ class AutoLoopStartReq(BaseModel):
     """跟 RegisterReq 复用同样的字段，auto-loop 内部传给每个 run。"""
     want_access_token: bool = True
     want_session_token: bool = True
-    want_refresh_token: bool = True
+    # ⚠️ 默认 **False**：拿 refresh_token 要跑 Codex OAuth 授权链，而那条链
+    #    可能**再发一封验证码**（auth_flow 的 need_otp 分支）—— 对短效邮箱
+    #    （code 模式，一次性）是致命的。前端两个页面也默认关。
+    #    真实默认值由前端的 wantRefreshToken / autoWantRefreshToken 决定；
+    #    这里的 default 只是「调用方没传这个字段」时的兜底。
+    want_refresh_token: bool = False
     proxy: str = ""              # 单代理（concurrency=1 + 无代理池时用）
     proxy_pool: str = ""         # 多代理池（每行一个）；优先于 proxy
     concurrency: int = 1         # 并发 worker 数（1-20）

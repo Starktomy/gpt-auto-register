@@ -5,12 +5,16 @@ import { storeToRefs } from 'pinia'
 import { useThemeStore } from '@/stores/theme'
 import { useStatsStore } from '@/stores/stats'
 import { useRuntimeStore } from '@/stores/runtime'
+import { useFormStore } from '@/stores/form'
+import { useProxyStore } from '@/stores/proxy'
 
 const route = useRoute()
 const router = useRouter()
 const theme = useThemeStore()
 const statsStore = useStatsStore()
 const runtime = useRuntimeStore()
+const formStore = useFormStore()
+const proxyStore = useProxyStore()
 const { stats } = storeToRefs(statsStore)
 const { banner } = storeToRefs(runtime)
 
@@ -50,8 +54,13 @@ const statPills = computed(() => [
   { label: '失败', value: stats.value.failed, type: 'danger' },
 ])
 
-onMounted(() => {
-  theme.apply()
+onMounted(async () => {
+  // 主题 / 表单默认值 / 代理池全部在后端 SQLite 里（原来散在各页面的
+  // localStorage），应用启动时统一拉一次。哪个失败都只是少一份偏好，
+  // 不该把整个界面卡住 —— 所以各自 catch 掉。
+  try { await theme.load() } catch (_) { theme.apply() }
+  try { await formStore.load() } catch (_) { /* 用默认值 */ }
+  try { await proxyStore.load() } catch (_) { /* 代理池拿不到就空着 */ }
   statsStore.startPolling()
   runtime.connectAutoStream()
 })

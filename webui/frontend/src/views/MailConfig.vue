@@ -47,6 +47,10 @@ async function load() {
     for (const p of providers.value) {
       for (const f of p.config_fields) {
         next[f.key] = f.type === 'password' ? '' : (saved.value[f.key] ?? '')
+        // select 类型没存过值时默认选第一项，省得用户每次都手动选一遍
+        if (f.type === 'select' && !next[f.key] && f.options?.length) {
+          next[f.key] = f.options[0]
+        }
       }
     }
     form.value = next
@@ -143,7 +147,18 @@ load()
 
         <!-- 配置项：完全由 provider 声明驱动 -->
         <el-form-item v-for="f in fields" :key="f.key" :label="f.label">
+          <!-- type=select 的配置项（如 Remail 的服务模式 / 库存策略）用下拉框，
+               候选项由 provider 在 config_fields[].options 里声明 -->
+          <el-select
+            v-if="f.type === 'select'"
+            v-model="form[f.key]"
+            style="width: 100%"
+            :placeholder="phFor(f)"
+          >
+            <el-option v-for="o in f.options" :key="o" :label="o" :value="o" />
+          </el-select>
           <el-input
+            v-else
             v-model="form[f.key]"
             :type="f.type === 'password' ? 'password' : 'text'"
             :show-password="f.type === 'password'"

@@ -42,6 +42,14 @@ const routes = [
     meta: { title: '邮箱列表', icon: 'Files', group: '数据' },
   },
   {
+    // Remail 订单管理：看下了什么邮箱、什么类型、能不能重复收件。
+    // 和「邮箱配置」（/settings/mail）分工：那边填参数，这边看订单。
+    path: '/mails',
+    name: 'mails',
+    component: () => import('@/views/MailService.vue'),
+    meta: { title: 'Remail 服务', icon: 'Message', group: '数据' },
+  },
+  {
     path: '/registered',
     name: 'registered',
     component: () => import('@/views/Registered.vue'),
