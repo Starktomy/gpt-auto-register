@@ -3,7 +3,8 @@
 设计：
   - 主控线程 manage_loop：监听 stop/pause、根据 concurrency 启停 worker
   - 多个 worker 线程：claim_next() → 注册 → 完成 → 继续
-  - 代理池：每个 worker 按 worker index 取一个代理（round-robin），避免同 IP 多号
+  - 代理池：每次注册**动态挑**一个可用代理（启用中 + 未超配额 + 用得少的优先），
+    避免同 IP 堆太多号；某个代理用满配额或被停用后自动绕开
   - 状态机：stopped → running → paused → running / stopped
   - 优雅暂停/停止：当前 worker 跑完才退出，不强杀
   - 复用 registrar.start_registration：每个号开一个 run，由 worker 等其结束
@@ -73,6 +74,7 @@ class AutoLoopController:
         self._subscribers: list[queue.Queue] = []
         # 代理池 / 并发数
         self._proxy_pool: list[str] = []
+        self._backend_proxy_pool: bool = False
         self._concurrency: int = 1
         # 目标成功数：0 = 不限量（保持旧行为）；>0 时累计成功达标即自动停止
         self._target_count: int = 0
@@ -96,8 +98,14 @@ class AutoLoopController:
             self._last_message = "auto-loop 启动"
             # 解析并发参数
             self._concurrency = max(1, min(20, int(self._options.get("concurrency") or 1)))
+            # 代理池：优先用后端 proxy_pool 表（有启用状态 / 上限 / 用量），
+            # 表为空时回落到前端传来的 proxy_pool 文本（每行一个）。
             pool_text = self._options.get("proxy_pool") or ""
             self._proxy_pool = _parse_proxy_pool(pool_text)
+            self._backend_proxy_pool = bool(db.list_proxies())
+            if self._backend_proxy_pool:
+                # 后端池是权威来源 —— 前端传来的文本只作兜底
+                self._proxy_pool = []
             # 目标成功数（0=不限量）
             self._target_count = max(0, int(self._options.get("target_count") or 0))
             # 启 manage 线程
@@ -210,7 +218,29 @@ class AutoLoopController:
         self._broadcast("state", self._snapshot())
 
     def _proxy_for_worker(self, worker_id: int) -> str:
-        """按 worker_id 从代理池里挑一个代理。空池时回退到 options.proxy。"""
+        """给这个 worker 取一个代理。
+
+        ⚠️ 这里从"按 worker_id 取模"改成了"每次动态挑"，因为取模是**静态绑定**：
+        worker-0 永远拿第 1 个代理、worker-1 永远拿第 2 个。某个代理被 OpenAI
+        风控后，所有 worker 会一直死磕那个 IP，永不自动换走 —— 这正是
+        "同一 IP 账号太多 → 全挂"的根因。
+
+        现在改成每次注册都从后端代理池里挑：
+          - 启用中（enabled=1）
+          - 未超配额（used_count < max_uses）
+          - 优先挑用得少的（天然均衡负载）
+        某个代理用满配额或被手动停用后，其余 worker 自动绕开它。
+
+        后端池为空时回落到旧的文本代理池（按 worker_id 取模，保持老行为）。
+        """
+        if self._backend_proxy_pool:
+            picked = db.pick_proxy()
+            if picked:
+                return picked
+            # 池里没有可用代理了 —— 返回空串，让调用方决定是等待还是停止。
+            # 这里**不**静默回落成 options.proxy：那样会绕过配额限制，
+            # 所有 worker 挤到同一个全局代理上，正好是限流要防的事。
+            return ""
         if self._proxy_pool:
             return self._proxy_pool[worker_id % len(self._proxy_pool)]
         return self._options.get("proxy", "") or ""
@@ -223,6 +253,10 @@ class AutoLoopController:
                 self._consecutive_network_fails = 0
             else:
                 self._registered_fail += 1
+                # ⚠️ 只有真正的环境/网络故障才计入熔断。
+                #    cf_blocked 是「这个出口 IP 被 CF 拒了」—— 换一个代理就能继续，
+                #    不该把整个批次停掉（实测日志里 7 次 CF 403 触发了熔断，
+                #    白白暂停了自动注册）。
                 if category == "network":
                     self._consecutive_network_fails += 1
                 else:
@@ -294,8 +328,8 @@ class AutoLoopController:
     def _worker_loop(self, worker_id: int):
         """单 worker 循环：claim → 跑 → 等结束 → 继续。"""
         idle_round = 0
-        proxy = self._proxy_for_worker(worker_id)
-        logger.info(f"[worker-{worker_id}] 启动 (proxy={proxy or '直连'})")
+        no_proxy_round = 0
+        logger.info(f"[worker-{worker_id}] 启动")
 
         while True:
             # 检查停止
@@ -320,6 +354,26 @@ class AutoLoopController:
                         f"[worker-{worker_id}] 目标 {self._target_count} 已锁定，退出"
                     )
                     return
+
+            # 每次注册前动态取代理（后端池有启用/上限/用量状态）。
+            # 代理池非空但取不到可用代理 → 说明全部停用或全部超配额，
+            # 这种情况要停下整个 auto-loop 并说清楚原因，不能静默直连 ——
+            # 直连等于所有 worker 挤同一个真实 IP，正是限流要防的事。
+            proxy = self._proxy_for_worker(worker_id)
+            if self._backend_proxy_pool and not proxy:
+                no_proxy_round += 1
+                stats = db.proxy_pool_stats()
+                msg = (
+                    f"代理池无可用代理（可用 {stats['available']} / 停用 {stats['disabled']}"
+                    f" / 已满 {stats['exhausted']}），已停止自动跑号"
+                )
+                if no_proxy_round == 1:
+                    self._set_message(msg)
+                    logger.warning(msg)
+                with self._lock:
+                    self._stop_event.set()
+                self._broadcast("state", self._snapshot())
+                return
 
             # claim 下一个号。要不要走号池由 provider 的 pooled 决定，
             # 非池化的（CF 这类自己造地址的）用虚拟占位。
@@ -389,6 +443,34 @@ class AutoLoopController:
 
             # 等当前 run 跑完
             ok, category = self._wait_run_finish(run_id)
+
+            # 失败计数在这里结算：成功计数由 registrar 在真正拿到凭证时结算
+            #（那里才知道这个号到底注册成功没有），失败则在这里记。
+            # 失败**不占用配额**（只累加 failed_count），符合"失败不计入上限"。
+            # ⚠️ pick_proxy() 选中时已经**预占**了一格，所以失败要先把预占还回去，
+            #    否则失败的号也会白占一个名额。
+            if not ok and proxy and self._backend_proxy_pool:
+                db.proxy_release(proxy)
+                db.proxy_used(proxy, ok=False)
+                # ⚠️ CF 拦截的处置与普通失败**完全不同**：
+                #    · 静态代理（固定出口 IP）→ 这个 IP 已被 CF 拉黑，
+                #      连续被拦达阈值就自动停用，别再拿它试
+                #    · 动态代理（每次换 IP）→ 不停用，只是这个出口不行，
+                #      换一次 IP 可能就通过了
+                # 具体动作交给 db.mark_proxy_cf_blocked 按类型决定。
+                if category == "cf_blocked":
+                    cfres = db.mark_proxy_cf_blocked(proxy)
+                    if cfres.get("auto_disabled"):
+                        logger.warning(
+                            f"[worker-{worker_id}] 静态代理被 CF 连续拦截 "
+                            f"{cfres.get('cf_blocked')} 次 → 已自动停用: {proxy[:60]}"
+                        )
+                    else:
+                        logger.info(
+                            f"[worker-{worker_id}] 代理被 CF 拦截"
+                            f"（{cfres.get('proxy_type')} 类型，累计 "
+                            f"{cfres.get('cf_blocked')} 次）→ 换下一个代理: {proxy[:60]}"
+                        )
 
             with self._lock:
                 self._worker_status.pop(worker_id, None)

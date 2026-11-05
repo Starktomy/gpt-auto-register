@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listRegistered, getRegistered, deleteRegistered,
   bulkDeleteRegistered, bulkDeleteAccounts, checkPlus,
-  listExportFormats, exportRegistered, updateCredentials,
+  listExportFormats, exportRegistered, updateCredentials, markAbnormal,
 } from '@/api/register'
 import { copyText, fmtTime } from '@/api/request'
 import { useFormStore, proxyText } from '@/stores/form'
@@ -13,11 +13,13 @@ import { useProxyStore } from '@/stores/proxy'
 import { useRuntimeStore } from '@/stores/runtime'
 import StatusDot from '@/components/StatusDot.vue'
 
-const { form } = storeToRefs(useFormStore())
+const formStore = useFormStore()
+const { form } = storeToRefs(formStore)
 // 检测用的代理必须能从代理池里挑：以前这页只在代码里读 form.proxy，页面上
-// 连个输入框都没有，主人在代理池换了密码，这里还在用 localStorage 里的旧值，
+// 连个输入框都没有，主人在代理池换了密码，这里还在用旧的旧值，
 // 结果是 curl:(97) 代理鉴权被拒 → 静默降级直连 → 拿真实 IP 打 chatgpt.com。
-const { list: proxyList } = storeToRefs(useProxyStore())
+const proxyStore = useProxyStore()
+const { list: proxyList } = storeToRefs(proxyStore)
 const runtime = useRuntimeStore()
 // dataVersion 要走 storeToRefs 才保持响应（watch 用）；bumpData 是 action，直接从
 // store 实例上取 —— storeToRefs 只转 state/getter，把 action 解构出来会丢 this。
@@ -107,9 +109,41 @@ async function confirm(msg) {
   catch (_) { return false }
 }
 async function deleteOne(email) {
-  if (!(await confirm(`删除 ${email} 的凭证？`))) return
+  if (!(await confirm(`删除 ${email} 的凭证？\n（该号占用的代理配额会自动还回代理池）`))) return
   try { await deleteRegistered(email); ElMessage.success('已删除'); load() }
   catch (e) { ElMessage.error(e.message) }
+}
+
+/**
+ * 标注 / 取消标注账号异常。
+ * 标注异常时后端会**自动释放该号占用的代理配额** —— 号已经废了，
+ * 它的 IP 名额应该还回池子给别的号用。
+ */
+async function toggleAbnormal(row) {
+  const next = !row.abnormal
+  const msg = next
+    ? `把 ${row.email} 标注为异常？\n（该号占用的代理配额会自动还回代理池）`
+    : `取消 ${row.email} 的异常标注？`
+  if (!(await confirm(msg))) return
+  try {
+    await markAbnormal({ emails: [row.email], abnormal: next })
+    ElMessage.success(next ? '已标注异常，配额已释放' : '已取消标注')
+    load()
+  } catch (e) { ElMessage.error(e.message) }
+}
+
+/** 批量标注异常 */
+async function markSelectedAbnormal() {
+  const emails = selected.value.map((r) => r.email)
+  if (!emails.length) { ElMessage.info('请先勾选账号'); return }
+  if (!(await confirm(
+    `把选中的 ${emails.length} 个账号标注为异常？\n` +
+    `（这些号占用的代理配额会自动还回代理池）`))) return
+  try {
+    const r = await markAbnormal({ emails, abnormal: true })
+    ElMessage.success(`已标注 ${r.updated} 个账号，配额已释放`)
+    load()
+  } catch (e) { ElMessage.error(e.message) }
 }
 async function deleteSelected() {
   const emails = selected.value.map((r) => r.email)
@@ -259,7 +293,9 @@ const credVisible = ref(false)
 const credEmail = ref('')
 const credData = ref(null)
 // totp_secret 放最前：它是唯一「服务端取不回」的字段，弹窗一打开就要能看到
-const CRED_KEYS = ['totp_secret', 'totp_factor_id', 'access_token', 'session_token', 'refresh_token', 'id_token', 'device_id', 'csrf_token', 'cookie_header', 'password']
+// session_json 放最后：它是**完整 JSON 原文**，很长，
+// 放前面会把其它短字段挤到下面看不到。
+const CRED_KEYS = ['totp_secret', 'totp_factor_id', 'access_token', 'session_token', 'refresh_token', 'id_token', 'device_id', 'csrf_token', 'cookie_header', 'password', 'session_json']
 const credRows = computed(() => {
   if (!credData.value) return []
   return CRED_KEYS.filter((k) => credData.value[k]).map((k) => ({ key: k, val: credData.value[k] }))
@@ -282,6 +318,21 @@ async function copyCell(email, field) {
 }
 function copyAllJson() {
   if (credData.value) copyText(JSON.stringify(credData.value, null, 2))
+}
+
+/**
+ * 只复制 session 接口的**原始响应 JSON**（不是拆分后的各个字段）。
+ *
+ * 这个 JSON 里有 accessToken / sessionToken / expires / user.id 等，
+ * 是这个号的凭证全集，比逐个字段复制方便。
+ */
+async function copySessionJson() {
+  const raw = credData.value?.session_json
+  if (!raw) {
+    ElMessage.warning('该账号没有保存 session JSON（注册时未拿到 session 接口响应）')
+    return
+  }
+  await copyText(raw)
 }
 
 // ── 手动编辑凭证 ──
@@ -344,7 +395,12 @@ async function saveEdit() {
 
 watch(page, () => load())
 watch(dataVersion, () => load())
-onActivated(() => load())
+onActivated(() => {
+  load()
+  // 代理池和表单默认值都在后端，这里补拉一次保证拿到最新值
+  proxyStore.load().catch(() => { /* 拉不到就空着 */ })
+  formStore.load().catch(() => { /* 用默认值 */ })
+})
 </script>
 <template>
   <div class="page">
@@ -392,6 +448,9 @@ onActivated(() => load())
           </template>
         </el-dropdown>
         <el-divider direction="vertical" />
+        <el-button type="warning" plain :disabled="!selected.length" @click="markSelectedAbnormal">
+          标异常 ({{ selected.length }})
+        </el-button>
         <el-button type="danger" plain :disabled="!selected.length" @click="deleteSelected">
           删除选中 ({{ selected.length }})
         </el-button>
@@ -466,13 +525,29 @@ onActivated(() => load())
             <span v-else class="hint">—</span>
           </template>
         </el-table-column>
+        <el-table-column label="代理" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.proxy" class="mono" style="font-size: 12px">{{ row.proxy }}</span>
+            <span v-else class="hint">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.abnormal" type="danger" size="small" effect="light">已标异常</el-tag>
+            <el-tag v-else type="success" size="small" effect="light">正常</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="时间" width="160">
           <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text @click="viewCred(row.email)">查看凭证</el-button>
             <el-button size="small" text type="warning" @click="openEdit(row)">编辑</el-button>
+            <el-button
+              size="small" text :type="row.abnormal ? 'info' : 'warning'"
+              @click="toggleAbnormal(row)"
+            >{{ row.abnormal ? '取消异常' : '标异常' }}</el-button>
             <el-button size="small" text type="danger" @click="deleteOne(row.email)">删除</el-button>
           </template>
         </el-table-column>
@@ -523,6 +598,13 @@ onActivated(() => load())
           <div style="display: flex; align-items: center; gap: 12px">
             <span class="mono" style="font-weight: 600">{{ credEmail }}</span>
             <el-button size="small" @click="copyAllJson">复制全部 JSON</el-button>
+            <el-button
+              size="small"
+              :disabled="!credData?.session_json"
+              @click="copySessionJson"
+            >
+              复制原始 session_json
+            </el-button>
           </div>
         </template>
         <div v-for="r in credRows" :key="r.key" style="margin-bottom: 12px">

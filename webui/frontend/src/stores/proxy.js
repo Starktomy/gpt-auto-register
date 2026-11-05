@@ -1,61 +1,120 @@
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
+import http from '@/api/request'
 
-const KEY = 'dango_proxy_pool_v1'
-const OLD_FORM_KEY = 'gpt_outlook_register_form_v2'
-
-function parseLines(s) {
-  return String(s || '').split('\n').map((x) => x.trim()).filter(Boolean)
-}
-function dedup(arr) {
-  return [...new Set(arr)]
-}
-
-// 代理池：独立管理的代理列表，localStorage 持久化。
-// 自动跑号时按 worker 顺序轮流取用（后端 /api/auto/start 的 proxy_pool 字段）。
+/**
+ * 代理池。
+ *
+ * 原来代理只存在 localStorage（纯字符串数组），后端完全不知道每个代理用了
+ * 几次 —— 既没法限流，也没法在某个代理被风控后自动换走。
+ *
+ * 现在池子由后端 SQLite（proxy_pool 表）持有：带启用状态、成功注册上限、
+ * 用量计数。**不再使用 localStorage** —— 数据只认后端这一份，
+ * 换台机器打开也是同一份代理池。
+ */
 export const useProxyStore = defineStore('proxy', () => {
-  let saved = []
-  try { saved = JSON.parse(localStorage.getItem(KEY) || '[]') } catch (_) { saved = [] }
-  // 从旧版「全自动批量」页的 autoProxyPool textarea 迁移一次
-  if (!saved.length) {
-    try {
-      const old = JSON.parse(localStorage.getItem(OLD_FORM_KEY) || '{}')
-      if (old.autoProxyPool) saved = dedup(parseLines(old.autoProxyPool))
-    } catch (_) { /* ignore */ }
-  }
+  // 后端返回的完整对象（含 enabled / max_uses / used_count / status）
+  const items = ref([])
+  const stats = ref({ total: 0, available: 0, disabled: 0, exhausted: 0 })
+  const loaded = ref(false)
 
-  const list = ref(saved)
+  // 纯代理地址列表（下拉框用）
+  const list = computed(() => items.value.map((i) => i.proxy))
   const text = computed(() => list.value.join('\n'))
-  const count = computed(() => list.value.length)
+  const count = computed(() => items.value.length)
 
-  watch(list, (v) => {
-    try { localStorage.setItem(KEY, JSON.stringify(v)) } catch (_) {}
-  }, { deep: true })
-
-  /** 用整段文本覆盖代理池（自动去重）。返回 { added, duplicated } 供提示。 */
-  function setFromText(s) {
-    const parsed = parseLines(s)
-    const unique = dedup(parsed)
-    list.value = unique
-    return { total: parsed.length, kept: unique.length, duplicated: parsed.length - unique.length }
+  async function load() {
+    const data = await http.get('/api/proxy/pool')
+    items.value = data.items || []
+    stats.value = data.stats || { total: 0, available: 0, disabled: 0, exhausted: 0 }
+    loaded.value = true
+    return data
   }
 
-  /** 追加一批（去重合并）。 */
-  function append(s) {
-    const merged = dedup([...list.value, ...parseLines(s)])
-    const added = merged.length - list.value.length
-    list.value = merged
-    return { added }
+  /** 批量导入。mode: replace（覆盖，保留已有代理的用量）/ append（追加）。 */
+  async function save(textValue, mode = 'replace') {
+    const data = await http.post('/api/proxy/pool', { text: textValue, mode })
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
   }
 
-  function remove(proxy) {
-    list.value = list.value.filter((x) => x !== proxy)
-  }
-  function clear() {
-    list.value = []
+  /** 局部更新（启用开关 / 上限 / 备注）。 */
+  async function update(proxy, patch) {
+    const data = await http.patch('/api/proxy/pool', { proxy, ...patch })
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
   }
 
-  return { list, text, count, setFromText, append, remove, clear }
+  async function remove(proxy) {
+    const data = await http.delete(`/api/proxy/pool/${encodeURIComponent(proxy)}`)
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
+  }
+
+  async function clear() {
+    const data = await http.delete('/api/proxy/pool')
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
+  }
+
+  /** 重置用量计数（不删代理）。不传 proxy = 全部重置。 */
+  async function resetCounts(proxy) {
+    const data = await http.post('/api/proxy/pool/reset', { proxy: proxy || null })
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
+  }
+
+  /**
+   * 清零 CF 拦截计数。
+   *
+   * 场景：静态代理被 CF 拉黑后自动停用了，主人换了 IP / 供应商修了之后
+   * 手动点一下就能重新启用，不用删了重导。
+   */
+  async function resetCfBlocked(proxy) {
+    const data = await http.post('/api/proxy/pool/cf_reset', { proxy: proxy || null })
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
+  }
+
+  /**
+   * 检测代理池里哪些支持 IPv6 出口。
+   *
+   * IPv6 的地址空间比 IPv4 大几个数量级，同一 /64 段里的"邻居"少得多
+   * → 被 Cloudflare 按 IP 段批量拉黑的概率低得多。
+   */
+  async function testIpv6(proxies, timeout = 10) {
+    const data = await http.post('/api/proxy/pool/ipv6_test', { proxies, timeout })
+    items.value = data.items || []
+    stats.value = data.stats || stats.value
+    return data
+  }
+
+  /** 找某个代理的详情。 */
+  function find(proxy) {
+    return items.value.find((i) => i.proxy === proxy) || null
+  }
+
+  /** 下拉框里显示的标签：带上用量，超限/停用的标出来。 */
+  function labelOf(proxy) {
+    const it = find(proxy)
+    if (!it) return proxy
+    const used = `${it.used_count}/${it.max_uses || '∞'}`
+    if (it.status === 'disabled') return `${proxy}（已停用）`
+    if (it.status === 'exhausted') return `${proxy}（已满 ${used}）`
+    return `${proxy}（已用 ${used}）`
+  }
+
+  return {
+    items, stats, list, text, count, loaded,
+    load, save, update, remove, clear, resetCounts, resetCfBlocked, testIpv6,
+    find, labelOf,
+  }
 })
 
 /**

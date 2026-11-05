@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onActivated } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
@@ -11,11 +11,19 @@ import LogPanel from '@/components/LogPanel.vue'
 import StatusDot from '@/components/StatusDot.vue'
 
 const router = useRouter()
-const { form } = storeToRefs(useFormStore())
+const formStore = useFormStore()
+const { form } = storeToRefs(formStore)
 const proxyStore = useProxyStore()
-const { count: proxyCount } = storeToRefs(proxyStore)
+const { count: proxyCount, stats: proxyStats } = storeToRefs(proxyStore)
 const runtime = useRuntimeStore()
 const { autoStatus } = storeToRefs(runtime)
+
+// 代理池和表单默认值都在后端。应用启动时 AdminLayout 已经拉过一次，
+// 这里再拉一次保证"直接进这个页面"也能拿到最新值。
+onActivated(() => {
+  proxyStore.load().catch(() => { /* 拉不到就空着 */ })
+  formStore.load().catch(() => { /* 用默认值 */ })
+})
 
 const st = computed(() => autoStatus.value.state || 'stopped')
 const canStart = computed(() => st.value === 'stopped')
@@ -41,7 +49,7 @@ async function start() {
       otp_timeout: parseInt(form.value.otpTimeout, 10) || 10,
       want_access_token: true,
       want_session_token: true,
-      want_refresh_token: true,
+      want_refresh_token: form.value.autoWantRefreshToken,
       cool_down_seconds: parseFloat(form.value.autoCoolDown) || 0,
       target_count: parseInt(form.value.autoTargetCount, 10) || 0,
       // 批量默认绑 2FA（后端默认是 false，这个字段以前压根没传，
@@ -90,13 +98,36 @@ async function call(fn, name) {
         </div>
       </el-form-item>
 
+      <el-form-item label="refresh_token">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+          <el-switch v-model="form.autoWantRefreshToken" />
+          <span>获取 refresh_token（Codex OAuth）</span>
+        </div>
+        <div class="hint" style="margin-top: 6px; line-height: 1.5">
+          默认<b>关</b>。开启后要额外跑一遍 Codex 授权链换 refresh_token，
+          而那条链<b>可能触发第二次收件</b> —— 用<b>短效邮箱（code 模式）</b>时务必保持关闭，
+          否则第二封验证码收不到会白等 180 秒。access_token 不受影响，照样能拿到。
+        </div>
+      </el-form-item>
+
       <el-form-item label="代理池">
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
           <el-tag :type="proxyCount ? 'success' : 'info'" effect="light">
             当前 {{ proxyCount }} 个代理
           </el-tag>
+          <el-tag v-if="proxyStats.available" type="success" size="small" effect="plain">
+            可用 {{ proxyStats.available }}
+          </el-tag>
+          <el-tag v-if="proxyStats.disabled" type="info" size="small" effect="plain">
+            已停用 {{ proxyStats.disabled }}
+          </el-tag>
+          <el-tag v-if="proxyStats.exhausted" type="warning" size="small" effect="plain">
+            已满 {{ proxyStats.exhausted }}
+          </el-tag>
           <span class="hint">
-            {{ proxyCount ? '各 worker 按顺序轮流取用' : '为空：所有 worker 用「单次注册」页填的单代理' }}
+            {{ proxyCount
+              ? '每次注册动态取一个可用代理（优先挑用得少的）；已满/已停用的自动跳过'
+              : '为空：所有 worker 用「单次注册」页填的单代理' }}
           </span>
           <el-button size="small" @click="router.push('/proxy')">管理代理池</el-button>
         </div>

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sys
 import threading
@@ -44,8 +45,13 @@ _lock = threading.Lock()
 #    一个 run 的日志全在自己那条线程上产生，所以线程绑定就能干净切开。
 _current_run = threading.local()
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR = Path(
+    os.environ.get("WEBUI_LOG_DIR")
+    or (Path(__file__).resolve().parent / "logs")
+)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+# ⚠️ LOG_DIR 支持用环境变量 WEBUI_LOG_DIR 覆盖 ——
+#    Docker 部署时日志要挂出来，容器重建后还能翻旧记录查问题。
 
 
 class QueueLogHandler(logging.Handler):
@@ -116,8 +122,46 @@ _NETWORK_ERROR_PATTERNS = [
 ]
 
 
+# 邮箱侧的限制（不是网络问题，也不是账号本身的问题）。
+#
+# ⚠️ 必须单独归类，**不能归 network**：
+#    network 类别会走 db.release_unused(email) → 号被放回 available 复用。
+#    而短效（一次性）邮箱的 serviceToken 是一次性取件凭证，邮件已经取过，
+#    复用必然再失败（白等一轮 + 白花钱）。
+#    所以短效邮箱取件超时 = 这个邮箱已经消耗掉了（平台会自动退款），
+#    号应该废弃，不复用。
+_MAIL_LIMITED_PATTERNS = [
+    "remail otp timeout",
+    "短效邮箱",
+]
+
+
+# Cloudflare 拦截的特征。
+#
+# ⚠️ 必须**单独**归类，不能混进 network：
+#    network = "整个环境炸了" → auto_loop 会熔断整个批次、暂停自动注册
+#    cf_blocked = "**这个出口 IP** 被 CF 拒了" → 只该换一个代理继续跑，
+#                 没必要把整个批次停掉。
+#
+# 判据来自实测日志的 403 特征：只有 `__cf_bm` 没有 `cf_clearance`
+# → 这是 WAF/BotManagement 的**直接拒绝**，根本没下发可解的 JS 挑战，
+#    所以 FlareSolverr / 浏览器方案无效，只能换出口 IP。
+_CF_BLOCKED_PATTERNS = [
+    "未种到 oai-did",
+    "__cf_bm",
+    "warmup 失败",
+    "cloudflare",
+    "just a moment",
+]
+
+
 def classify_error(err: str, mail_source: str = "") -> str:
-    """分类错误：'network'（环境/代理问题，号无辜）/ 'account'（号本身有问题）/ 'unknown'。
+    """分类错误：
+      'network'     —— 环境/代理整体问题（号无辜，会 release 复用 + 计入熔断）
+      'account'     —— 号/邮箱本身有问题（这个号废了，换下一个）
+      'mail_limited'—— 邮箱侧限制（如短效邮箱已消耗）
+      'cf_blocked'  —— **这个出口 IP** 被 Cloudflare 拒了（换代理即可，不必熔断）
+      'unknown'     —— 兜底
 
     mail_source 用来问 provider 要不要豁免某些模式 —— 比如 iCloud 中转号
     本来就是买的老号，"已有账号"是正常流程不是失败（见
@@ -125,12 +169,32 @@ def classify_error(err: str, mail_source: str = "") -> str:
     """
     s = (err or "").lower()
 
+    # ⚠️ mail_limited 要在 network 之前判：短效邮箱的报错文案里含
+    #    "timeout"（"Remail OTP timeout ..."），会被 network 特征命中。
+    #    但它不是网络问题 —— 是邮箱一次性、已经消耗掉了。
+    if any(p in s for p in _MAIL_LIMITED_PATTERNS):
+        return "mail_limited"
+
+    # ⚠️ cf_blocked 也要在 network 之前判：
+    #    "warmup 失败：4 次重试均未拿到 ... oai-did cookie" 这句里
+    #    含 "超时"/"失败" 类特征，而且 cloudflare 特征也在 network 列表里。
+    #    但它的正确处置是「换代理」，不是「熔断整个批次」。
+    if any(p in s for p in _CF_BLOCKED_PATTERNS):
+        return "cf_blocked"
+
     account_patterns = [
         "wrong_email_otp_code", "invalid_grant", "imap xoauth2",
         "outlook imap account unusable", "user is authenticated but not connected",
         "outlook refresh failed", "authentication failed", "authenticate failed",
         "outlook otp timeout", "registration_disallowed",
         "已有账号", "账号被", "refresh_token 失效",
+        # ⚠️ 下面两个是账号/邮箱层面的拒绝，不是环境问题：
+        #   · user_already_exists：这个邮箱地址在 OpenAI 已经有账号了
+        #     （二手邮箱交易池，别人先注册过了）→ 这个号彻底废了，换下一个
+        #   · invalid_state：sign-in session 失效（"Please start over to continue"）
+        #     → 是 session 过期，不是网络断了；不该因此触发熔断
+        "user_already_exists",
+        "invalid_state",
     ]
     if mail_source:
         try:
@@ -201,12 +265,48 @@ def _do_register(
         # auth_flow 会误判为"已有账号"分支 → 不设 WEBUI_ALLOW_LOGIN 会 fast-fail。
         # 单号 WebUI 场景下 fast-fail 没意义（批量跑才需要"跳过被识别的号"），故强制 ON。
         env_overrides["WEBUI_ALLOW_LOGIN"] = "1"
-        env_overrides["OTP_TIMEOUT"] = str(int(options.get("otp_timeout") or 180))
-        # 用户不要 refresh_token → 直接跳过 Codex OAuth（每次都失败浪费 ~10s + 一堆告警）
-        if not options.get("want_refresh_token", True):
+        # OTP 等待下限 60 秒。
+        # ⚠️ 原来完全跟着前端传的值走，而前端默认是 10 秒 —— 对 Remail 这类
+        #    **聚合转发**邮箱根本不够：邮件要经平台中转再投到目标邮箱，
+        #    实测 20~30 秒才到（发码 18:34:41 → 到达 18:35:05），10 秒必然超时，
+        #    注册跑到最后一步全废。这里兜一个下限，用户仍然可以调大。
+        try:
+            _otp_timeout = int(options.get("otp_timeout") or 180)
+        except (TypeError, ValueError):
+            _otp_timeout = 180
+        env_overrides["OTP_TIMEOUT"] = str(max(60, _otp_timeout))
+        # ── 是否跑 Codex OAuth（换 refresh_token）──
+        #
+        # 两个条件都满足才跑：
+        #   1. 用户要 rt（want_refresh_token）
+        #   2. 接码真的可用 —— Codex 授权落到 /add-phone 时，只有配了 SMS
+        #      controller 才推进得动（auth_flow._handle_add_phone_via_sms 的
+        #      前置条件是 self._sms_callback is not None）。接码没配时，
+        #      authorize 走不通 → rt=0 → 白耗 8~10 秒。
+        #      更糟的是授权链可能回退到 /log-in **再发一封验证码**
+        #      （auth_flow._codex_drive_login_from_log_in 的 need_otp 分支）——
+        #      对短效邮箱（code 模式，一次性）这是致命的。
+        #
+        # ⚠️ OAUTH_SECONDARY_AUTHORIZE_EXCHANGE 以前漏了没关：那个"二次
+        #    authorize"分支同样可能触发收件，一并关掉。
+        want_rt = bool(options.get("want_refresh_token", False))
+        sms_ready = _sms_ready()
+        reglog = logging.getLogger("registrar")
+        if not want_rt:
             env_overrides["SKIP_OAUTH_TOKEN_EXCHANGE"] = "1"
             env_overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
             env_overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
+            env_overrides["OAUTH_SECONDARY_AUTHORIZE_EXCHANGE"] = "0"
+            reglog.info("[register] 不获取 refresh_token → 跳过 Codex OAuth（不触发二次收件）")
+        elif not sms_ready:
+            # 用户想要 rt，但接码没配 —— add-phone 分支推进不动，跑也是白跑。
+            env_overrides["OAUTH_CODEX_RT_EXCHANGE"] = "0"
+            env_overrides["OAUTH_CODEX_RT_BEFORE_CALLBACK"] = "0"
+            env_overrides["OAUTH_SECONDARY_AUTHORIZE_EXCHANGE"] = "0"
+            reglog.info(
+                "[register] 未启用接码（无 API Key）→ 跳过 Codex OAuth："
+                "add-phone 分支推进不动，且可能触发二次收件"
+            )
         # PROXY 走 cfg.proxy，无需 env
 
         cfg = Config()
@@ -285,7 +385,13 @@ def _do_register(
             account_callback=_account_callback_for_flow,
         )
         _emit_status(run_id, "phase", {"phase": "starting", "email": email})
-        logging.getLogger("registrar").info(f"[register] 开始: {email}")
+        # 把关键开关的实际生效值打进日志 —— 主人反馈过"关掉 2FA 好像没反应"，
+        # 光看界面分不清是开关没传过来还是绑定失败，这里留个明确的凭据。
+        logging.getLogger("registrar").info(
+            f"[register] 开始: {email} | 2FA绑定={'开' if options.get('want_2fa') else '关'} "
+            f"| OTP等待={env_overrides.get('OTP_TIMEOUT')}s "
+            f"| 代理={'有' if str(options.get('proxy') or '').strip() else '直连'}"
+        )
 
         partial = False
         d: dict
@@ -333,6 +439,17 @@ def _do_register(
         if options.get("want_refresh_token", True):
             d["refresh_token"] = full.get("refresh_token", "")
             d["id_token"] = full.get("id_token", "")
+
+        # ─ session 接口的完整响应 JSON 原文 ──
+        # 上面那个 dict 是**白名单重建**的，没列出来的字段全被抹掉了，
+        # 所以 session_json 必须显式带上，否则存不进库。
+        #
+        # 它跟 access_token / session_token 是同一份凭证的两个视角：
+        # 拆开的那几列方便程序用，完整 JSON 保留 expires / user.* 等
+        # 拆的时候丢掉的字段。两者都存，不冲突。
+        _sess_json = str(full.get("session_json") or "").strip()
+        if _sess_json:
+            d["session_json"] = _sess_json
 
         # ─ 密码回读：必须在 2FA 之前 ─
         # ⚠️ d 是**本轮内存里**的结果，它不一定知道这个号有密码：
@@ -407,8 +524,30 @@ def _do_register(
                 logging.getLogger("registrar").warning(
                     f"[register] 2FA 绑定异常（账号仍有效）: {e}"
                 )
+        # 记下这个号用的代理。
+        # 用途：① 导出「access_token----代理」给 chatgpt2api，让注册和使用同一个 IP；
+        #      ② 账号被删除 / 标注异常时，把这个代理占用的配额还回去。
+        run_proxy = str(options.get("proxy") or "").strip()
+        if run_proxy:
+            d["proxy"] = run_proxy
         # 落库（密码已在 2FA 之前回读补齐，这里 d 里该有的都有了）
         db.save_registered(d)
+        # ⚠️ 这里**不再**给 used_count +1：自动跑号时 pick_proxy() 选中代理
+        #    已经预占了一格，成功就是确认这格；失败由 auto_loop 把预占还回去。
+        #    但「单次注册」页是用户手填的代理，没走过 pick_proxy()，
+        #    所以那种情况要在这里补记一次（代理不在池里时 proxy_used 也不会命中，
+        #    只是个记账，不会出错）。
+
+        # Remail：把这笔订单关联到注册成功的账号，
+        # 这样「邮箱服务」页能看出哪一单对应哪个号。
+        order_no = str(getattr(mail, "_order_no", "") or "").strip()
+        if order_no:
+            try:
+                db.link_remail_order(order_no, d.get("email") or email)
+            except Exception as e:
+                logging.getLogger("registrar").warning(
+                    f"[register] Remail 订单关联失败 order={order_no}: {e}"
+                )
         # 非池化 provider 的 email 是虚拟占位（xxx_placeholder_N@placeholder.local），
         # 号池里根本没这行，不能去 mark。判据用 provider 的 pooled，不写死 kind。
         if is_pooled:
@@ -468,8 +607,41 @@ def _do_register(
                 logging.getLogger("registrar").warning(
                     f"[register] {email} 判定为网络/环境错误，号已 release 回 available"
                 )
+            elif category == "mail_limited":
+                # ⚠️ 邮箱侧的固有限制（如短效邮箱已消耗），**不能 release**。
+                #    短效邮箱的 serviceToken 是一次性的，邮件已经取过 ——
+                #    release 回 available 只会让同一个邮箱再被领一次、再失败一次。
+                #    mark_failed 把它标成不可用，号池会自动跳过。
+                db.mark_failed(email, f"[{category}] {err}")
+                logging.getLogger("registrar").warning(
+                    f"[register] {email} 判定为邮箱侧限制（短效邮箱已消耗），号废弃不复用"
+                )
             else:
                 db.mark_failed(email, f"[{category}] {err}")
+
+        # 「单次注册」预占的代理配额在这里归还 —— 失败不占配额。
+        # （自动跑号的预占由 auto_loop 归还，不走这里。）
+        if options.get("proxy_reserved"):
+            _p = str(options.get("proxy") or "").strip()
+            if _p:
+                db.proxy_release(_p)
+                db.proxy_used(_p, ok=False)   # 只记失败次数
+
+        # Remail：记一下这次失败原因。
+        # attempt_count 在 provider 取邮箱时已经加过了，这里只补失败原因，
+        # 方便在「邮箱服务」页看出这个邮箱为什么反复失败（是超时还是 409）。
+        _order_no = str(getattr(mail, "_order_no", "") or "").strip()
+        if _order_no:
+            try:
+                db.mark_remail_order_attempt(_order_no, ok=False, error=err[:200])
+                logging.getLogger("registrar").warning(
+                    f"[register] Remail 订单 {_order_no[:16]} 本次注册失败: {err[:120]}"
+                )
+            except Exception as e:
+                logging.getLogger("registrar").warning(
+                    f"[register] 记 Remail 订单失败原因出错: {e}"
+                )
+
         db.finish_run(run_id, "failed", err, category=category)
         _emit_status(run_id, "error", {"message": err, "category": category})
 
@@ -603,6 +775,27 @@ def _build_sms_callback(run_id: str) -> Optional[PhoneCallbackController]:
     except Exception as e:
         smslog.warning(f"[sms] 创建接码 controller 失败: {e}")
         return None
+
+
+def _sms_ready() -> bool:
+    """接码是否**真的可用**（不只是开关开了，还得有 API Key）。
+
+    为什么单独抽这个函数：`_build_sms_callback` 在开关开但没配 Key 时
+    也会返回 None。判断 Codex OAuth 值不值得跑，必须跟"controller 能否
+    真正构建"对齐，否则会出现"以为能跑、实际拿不到"的白跑。
+
+    跟 Codex 授权链的关系：授权落到 /add-phone 时，只有配了 SMS controller
+    才推进得动（auth_flow._handle_add_phone_via_sms 的前置条件）。
+    """
+    try:
+        cfg = db.get_sms_internal_config()
+    except Exception:
+        return False
+    if not cfg.get("sms_enabled"):
+        return False
+    if not (cfg.get("sms_api_key") or "").strip():
+        return False
+    return True
 
 
 def start_registration(account: dict, options: dict) -> str:

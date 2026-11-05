@@ -11,20 +11,27 @@ import { useRuntimeStore } from '@/stores/runtime'
 import LogPanel from '@/components/LogPanel.vue'
 
 const route = useRoute()
-const { form } = storeToRefs(useFormStore())
-const { list: proxyList } = storeToRefs(useProxyStore())
+const formStore = useFormStore()
+const { form } = storeToRefs(formStore)
+const proxyStore = useProxyStore()
+// 下拉选项带上用量（已用 12/50 / 已满 / 已停用），
+// 让主人一眼看出哪个代理还能用、哪个快满了。
+const { list: proxyList } = storeToRefs(proxyStore)
 const runtime = useRuntimeStore()
 const { runningSingle, lastRunResult } = storeToRefs(runtime)
 
 const starting = ref(false)
 const regEmail = ref('')
 // 2FA 默认开（主人要求每个号都绑）。绑定不可逆，所以留开关。
-// 放在 form store（localStorage 持久化）而不是组件局部 ref —— 组件是
+// 放在 form store（后端持久化）而不是组件局部 ref —— 组件是
 // keep-alive 的，切页不丢，但刷新页面会重建，关了就白关。
 
-// 从「邮箱列表 → 使用」跳转过来时，带上指定邮箱
+// 代理池和表单默认值都在后端。应用启动时 AdminLayout 已经拉过一次，
+// 这里再拉一次保证"直接进这个页面"（刷新后 keep-alive 不触发）也能拿到最新值。
 onActivated(() => {
   if (route.query.email) regEmail.value = String(route.query.email)
+  proxyStore.load().catch(() => { /* 拉不到就空着，不打断注册 */ })
+  formStore.load().catch(() => { /* 拉不到就用默认值 */ })
 })
 
 async function run() {
@@ -38,7 +45,7 @@ async function run() {
       otp_timeout: parseInt(form.value.otpTimeout, 10) || 10,
       want_access_token: true,
       want_session_token: true,
-      want_refresh_token: true,
+      want_refresh_token: form.value.wantRefreshToken,
       want_2fa: form.value.want2fa,
     })
     runtime.addLog(`[client] 启动注册 run_id=${r.run_id} email=${r.email}`, 'evt')
@@ -79,10 +86,15 @@ async function copyField(email, field) {
                 :reserve-keyword="false" placeholder="socks5://user:pass@host:1080"
                 style="width: 100%"
               >
-                <el-option v-for="p in proxyList" :key="p" :label="p" :value="p" />
+                <el-option
+                  v-for="p in proxyList" :key="p"
+                  :label="proxyStore.labelOf(p)" :value="p"
+                  :disabled="proxyStore.find(p)?.status !== 'available'"
+                />
               </el-select>
               <div class="hint" style="margin-top: 4px">
                 Plus 检测、自动批量的兜底代理都复用这里；批量并发轮换请到「代理池」页管理。
+                已满或已停用的代理会标灰不可选。
               </div>
             </el-form-item>
             <el-form-item label="OTP 等待秒数">
@@ -98,6 +110,17 @@ async function copyField(email, field) {
                 secret 仅在绑定时下发<b>一次</b>、服务端取不回，
                 请在下方结果或「注册结果」页<b>立刻复制导出</b>并录入验证器，丢失 = 该号 2FA 永久锁死。
                 仅对<b>有密码</b>的号生效，无密码号会自动跳过。
+              </div>
+            </el-form-item>
+            <el-form-item>
+              <div style="display: flex; align-items: center; gap: 10px">
+                <el-switch v-model="form.wantRefreshToken" />
+                <span>获取 refresh_token（Codex OAuth）</span>
+              </div>
+              <div class="hint" style="margin-top: 6px; line-height: 1.5">
+                默认<b>关</b>。开启后要额外跑一遍 Codex 授权链换 refresh_token，
+                而那条链<b>可能触发第二次收件</b> —— 用<b>短效邮箱（code 模式）</b>时务必保持关闭，
+                否则第二封验证码收不到会白等 180 秒。access_token 不受影响，照样能拿到。
               </div>
             </el-form-item>
             <el-button type="primary" :loading="starting || runningSingle" @click="run">
