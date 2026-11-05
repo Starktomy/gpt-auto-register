@@ -595,6 +595,7 @@ class OutlookMailProvider(MailProvider):
         email_addr: str,
         timeout: int = 120,
         issued_after: Optional[float] = None,
+        earliest: Optional[float] = None,
     ) -> str:
         method_timeout = max(1, int(timeout))
         strict_threshold = (issued_after - 5) if issued_after else (time.time() - 5)

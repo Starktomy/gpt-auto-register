@@ -957,6 +957,7 @@ class ICloudRelayProvider(MailProvider):
         email_addr: str,
         timeout: int = 120,
         issued_after: Optional[float] = None,
+        earliest: Optional[float] = None,
     ) -> str:
         """轮询中转页等 OTP。
 

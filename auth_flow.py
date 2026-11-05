@@ -911,6 +911,17 @@ class AuthFlow:
 
         need_otp = (page_type == "email_otp_verification") or ("/email-verification" in (continue_url or ""))
         if need_otp:
+            # ⚠️ 兜底防线：Codex 授权链**不允许**触发第二次收件。
+            #    这条链只有在用户明确要 refresh_token 时才会跑；跑的时候如果
+            #    又被弹回 /log-in 落到 email_otp_verification，就会再发一封 OTP ——
+            #    对短效邮箱（code 模式，一次性）那封收不到，白等 180 秒，
+            #    整个号就废了。宁可这次 Codex 拿不到 rt，也不能偷走收件机会。
+            if self._env_flag("SKIP_OAUTH_TOKEN_EXCHANGE", "0"):
+                logger.warning(
+                    "Codex 登录推进需要 OTP，但已禁用 Codex OAuth（不获取 refresh_token）"
+                    "→ 不发第二封验证码，本次放弃 Codex 授权"
+                )
+                return continue_url or ""
             if mail_provider is None:
                 logger.warning("Codex 登录推进需要 OTP，但未提供 mail_provider")
                 return continue_url or ""
@@ -1432,7 +1443,7 @@ class AuthFlow:
                     )
 
             if not callback_url:
-                logger.debug("Codex OAuth 未捕获 callback code, final=%s", (final_url or "")[:180])
+                logger.warning("Codex OAuth 未捕获 callback code, final=%s", (final_url or "")[:180])
                 return False
             return self._exchange_codex_callback_code(
                 callback_url=callback_url,
@@ -2864,17 +2875,6 @@ class AuthFlow:
         session_token = cookie_st or json_st
         access_token = sess_json.get("accessToken", "") or sess_json.get("access_token", "") or ""
 
-        if session_token:
-            self.result.session_token = session_token
-        if access_token:
-            self.result.access_token = access_token
-        self.result.cookie_header = self._build_chatgpt_cookie_header()
-
-        _log = logger.info if first_call else logger.debug
-        _log(f"session: st={'有' if session_token else '无'} at={'有' if access_token else '无'}")
-        return session_token, access_token
-
-    def _consume_callback_for_session(self, callback_url: str) -> bool:
         # 保存 session 接口的完整响应 JSON 原文（紧凑格式，一行）。
         #
         # ⚠️ 只在有内容时保存 —— 空 dict 存 "{}" 没意义，还会污染导出文件。
@@ -2888,6 +2888,17 @@ class AuthFlow:
                 # 序列化失败不能拖垮注册（token 已经拿到了）
                 pass
 
+        if session_token:
+            self.result.session_token = session_token
+        if access_token:
+            self.result.access_token = access_token
+        self.result.cookie_header = self._build_chatgpt_cookie_header()
+
+        _log = logger.info if first_call else logger.debug
+        _log(f"session: st={'有' if session_token else '无'} at={'有' if access_token else '无'}")
+        return session_token, access_token
+
+    def _consume_callback_for_session(self, callback_url: str) -> bool:
         """主动 GET callback URL 让 chatgpt.com NextAuth 设 session cookie。
 
         协议层 follow_redirect_chain 故意不消费 callback（为后续 OAuth token exchange 留 code），
@@ -3117,6 +3128,15 @@ class AuthFlow:
     # ── 完整注册流程 ──
     def run_register(self, mail_provider: MailProvider) -> AuthResult:
         """执行完整注册流程"""
+        # 本次注册流程开始的时刻 —— 取件时间窗的**下界兜底**。
+        #
+        # ⚠️ 为什么要单独记：一次性邮箱（短效 code 模式）只保留**一封**邮件，
+        #    而那封是服务端在「提交邮箱」时自动发的 —— 它比"主动补发时刻"
+        #    （otp_sent_at）早十几秒到达（中间隔着设密码的 PoW，实测 16~21 秒）。
+        #    若用 otp_sent_at 做下界，唯一那封会被时间窗滤掉 → 死等超时。
+        #    所以短效模式下界要用这个更早的时刻。
+        self._register_started_at = time.time()
+
         # 检查网络
         if not self.check_proxy():
             logger.warning("网络预检查未通过，继续尝试注册链路以获取精确错误...")
@@ -3137,8 +3157,55 @@ class AuthFlow:
         csrf_token = self.get_csrf_token()
         auth_url = self.get_auth_url(csrf_token, email=email)
         device_id = self.auth_oauth_init(auth_url)
-        sentinel = self.get_sentinel_token(device_id)
-        is_new = self.signup(email, sentinel)
+
+        # ── signup 链可重试 ──
+        #
+        # ⚠️ 为什么可重试：409 invalid_state 的服务端原文是
+        #    "Your sign-in session is no longer valid. Please start over to continue."
+        #    —— 它本来就是要你**从头再来**。实测原因：warmup 拿到了 oai-did，
+        #    但中间隔着 PoW（19~21 秒），等 PoW 跑完 session 已经过期。
+        #
+        #    重来一遍 = 换出口 IP 重新走 warmup + signup，**邮箱不用换**
+        #    （邮箱是花钱买的，重试同一个邮箱 = 不再浪费钱）。
+        #    实测日志里 3/10 的订单栽在这，每次 10 元 —— 重试能救回这 30%。
+        #
+        # ⚠️ 只对 invalid_state 重试。user_already_exists 这类业务拒绝
+        #    重试多少次都没用（邮箱本身废了），不该在这里空转。
+        max_attempts = 3  # 首次 + 2 次重试
+        is_new = False
+        last_err = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                sentinel = self.get_sentinel_token(device_id)
+                is_new = self.signup(email, sentinel)
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                if "invalid_state" not in last_err.lower():
+                    raise
+                if attempt >= max_attempts:
+                    logger.error(
+                        f"signup 链连续 {attempt} 次 invalid_state，放弃"
+                        f"（邮箱已付费，本轮浪费）: {last_err[:200]}"
+                    )
+                    raise
+                logger.warning(
+                    f"signup 撞 invalid_state（第 {attempt}/{max_attempts} 次），"
+                    f"换出口 IP 重来 —— 邮箱复用，不额外花钱"
+                )
+                # 换出口 IP：重建 session（新的 oai-did）并重新 warmup
+                time.sleep(3 + attempt * 2)
+                self.session = create_http_session(
+                    proxy=self.config.proxy,
+                    impersonate=self._impersonate_candidates[self._impersonate_idx],
+                    user_agent=self._ua,
+                )
+                if not self.warmup():
+                    raise RuntimeError(
+                        "warmup 失败：4 次重试均未拿到 chatgpt.com 的 oai-did cookie，"
+                        "继续注册必然 409 invalid_state（多为代理出口 IP 不通或被 CF 拦），"
+                        "请检查代理后重试"
+                    )
 
         # 号池邮箱被 OpenAI 标"已有账号" 处理策略:
         #   WEBUI_ALLOW_LOGIN=1 (promo-link 等需要拿 access_token 的模式) → 走 OTP login 拿凭证
@@ -3178,29 +3245,62 @@ class AuthFlow:
         #    注册出来的号全是无密码号（只能靠临时邮箱收码登录，域名一失效就永久丢失）。
         #    实测 2026-08-06: 这类号照样能走 POST user/register 设密码并成功。
         if is_new or self._existing_email_verification_mode == "passwordless_signup":
-            # 新账号：注册密码 → 主动重新发码 → 验证 OTP → 创建账户
-            password_registered = self.register_password(email)
-            if password_registered:
-                # ⚠️ POST user/register 成功后服务端**切换流程**到 email_otp_send 页
-                #    （实测响应 continue_url=/api/accounts/email-otp/send, page.type=email_otp_send），
-                #    signup 阶段自动发的那封 OTP 立即失效，拿它 verify 会 409 invalid_state。
-                #    所以必须主动重新发码，且以本次发码时间为准，不能再用 -8 偏移。
-                #    时间戳在发码**之前**取：邮件是服务端在这次请求里发出的，
-                #    先发再取时间会让 otp_sent_at 晚于邮件时间戳，被 issued_after 过滤掉。
-                otp_sent_at = time.time()
-                try:
-                    self.send_otp()
-                except Exception as e:
-                    # 429 等发码失败时别让整个注册崩掉，退回 resend 兜底
-                    logger.warning(f"密码注册后主动发码失败，回退 resend: {e}")
-                    self.kickoff_otp_delivery("post_register_password_send_failed")
+            # ── 短效（一次性）邮箱：跳过设密码 ──
+            #
+            # ⚠️ 为什么必须跳（详见 base.MailProvider.ephemeral_mailbox）：
+            #    设密码（POST user/register）成功后，服务端切到 email_otp_send 页，
+            #    **提交邮箱时自动发的那封 OTP 立即失效** → 必须主动补发第 2 封。
+            #    而短效邮箱只保留一封邮件，**收不到第 2 封** → 死锁：
+            #      · 不补发 → 拿失效的第 1 封 verify → 409 invalid_state
+            #      · 补发   → 邮件收不到 → 等到超时
+            #    跳过设密码就不触发流程切换，第 1 封保持有效 → 直接 verify 即可，
+            #    全程只要 1 封邮件。
+            #
+            #    代价：注册出来是无密码号（只能靠邮箱收码登录）。
+            #    短效邮箱本来就一次性，邮箱失效后无密码号等于永久丢失 ——
+            #    但 access_token 照样能拿到（verify_otp / create_account /
+            #    get_auth_session 三处都不需要密码），导出给 chatgpt2api 照常用。
+            skip_password = bool(getattr(mail_provider, "ephemeral_mailbox", False))
+            if skip_password:
+                logger.info(
+                    "[register] 短效邮箱模式（一次性）：跳过设密码，"
+                    "只收 1 封验证码（服务端自动发的那封，此时仍有效）"
+                )
+                # 时间窗下界用「注册开始」—— 那封邮件比"主动发码时刻"早十几秒到。
+                otp_sent_at = self._register_started_at
             else:
-                logger.warning("注册密码失败，回退到已有账号 OTP 路径")
-                self.fetch_client_auth_session_dump("post_register_password_failed_new")
-                # 密码注册失败时 fallback 主动发码
-                if not self.kickoff_otp_delivery("register_password_failed_fallback"):
-                    self.send_otp()
-                otp_sent_at = time.time()
+                # 新账号：注册密码 → 主动重新发码 → 验证 OTP → 创建账户
+                password_registered = self.register_password(email)
+                if password_registered:
+                    # ⚠️ POST user/register 成功后服务端**切换流程**到 email_otp_send 页
+                    # （实测响应 continue_url=/api/accounts/email-otp/send, page.type=email_otp_send），
+                    # signup 阶段自动发的那封 OTP 立即失效，拿它 verify 会 409 invalid_state。
+                    # 所以必须主动重新发码，且以本次发码时间为准，不能再用 -8 偏移。
+                    # 时间戳在发码**之前**取：邮件是服务端在这次请求里发出的，
+                    # 先发再取时间会让 otp_sent_at 晚于邮件时间戳，被 issued_after 过滤掉。
+                    otp_sent_at = time.time()
+                    try:
+                        # ⚠️ 这里会收到**两封**验证码邮件，验证码相同、发件人不同：
+                        #    · otp@tm1.openai.com    ← authorize/continue 时服务端自动发的
+                        #    · noreply@tm.openai.com  ← 这次 send_otp 发的
+                        # 原因：passwordless_signup 流程下服务端在提交邮箱那步
+                        # 已经自动发过一封；POST user/register 成功后流程切到
+                        # email_otp_send 页，必须**主动重新发码**（旧的那封
+                        # 立即失效，verify 会 409 invalid_state）。
+                        # 所以"只请求一次发码、却收到两封邮件"是正常的，
+                        # 取件侧靠 issued_after 时间窗只取新的那封。
+                        self.send_otp()
+                    except Exception as e:
+                        # 429 等发码失败时别让整个注册崩掉，退回 resend 兜底
+                        logger.warning(f"密码注册后主动发码失败，回退 resend: {e}")
+                        self.kickoff_otp_delivery("post_register_password_send_failed")
+                else:
+                    logger.warning("注册密码失败，回退到已有账号 OTP 路径")
+                    self.fetch_client_auth_session_dump("post_register_password_failed_new")
+                    # 密码注册失败时 fallback 主动发码
+                    if not self.kickoff_otp_delivery("register_password_failed_fallback"):
+                        self.send_otp()
+                    otp_sent_at = time.time()
 
             try:
                 otp_timeout = max(10, int(self._get_env("OTP_TIMEOUT", "60")))
@@ -3210,6 +3310,9 @@ class AuthFlow:
                 email,
                 timeout=otp_timeout,
                 issued_after=otp_sent_at,
+                # 短效邮箱的下界兜底：只有 1 封邮件，且那封早于 otp_sent_at。
+                # 普通 provider 不认识这个参数 → base 里默认忽略。
+                earliest=self._register_started_at,
             )
             try:
                 self.verify_otp(otp_code)
@@ -3225,6 +3328,7 @@ class AuthFlow:
                         email,
                         timeout=otp_timeout,
                         issued_after=otp_sent_at,
+                        earliest=self._register_started_at,
                     )
                     self.verify_otp(otp_code)
                     self.fetch_client_auth_session_dump("post_verify_otp_retry_new")

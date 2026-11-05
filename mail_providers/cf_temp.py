@@ -317,6 +317,7 @@ class CFTempEmailProvider(MailProvider):
         email_addr: str,
         timeout: int = 120,
         issued_after: Optional[float] = None,
+        earliest: Optional[float] = None,
     ) -> str:
         """轮询 /admin/mails 等待 OTP（6 位数字）。
 

@@ -104,10 +104,11 @@ class ConfigField:
         key: str,
         label: str,
         *,
-        type: str = "text",          # text / password / number
+        type: str = "text",          # text / password / number / select
         required: bool = True,
         placeholder: str = "",
         help: str = "",
+        options: Optional[list[str]] = None,   # type="select" 时的候选项
     ):
         self.key = key
         self.label = label
@@ -115,6 +116,7 @@ class ConfigField:
         self.required = required
         self.placeholder = placeholder
         self.help = help
+        self.options = list(options or [])
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +126,7 @@ class ConfigField:
             "required": self.required,
             "placeholder": self.placeholder,
             "help": self.help,
+            "options": self.options,
         }
 
 
@@ -190,6 +193,25 @@ class MailProvider(ABC):
     pooled: bool = False                 # 是否从号池 claim
     ephemeral: bool = False              # 地址是否每次新建
 
+    # 「一次性邮箱」标记 —— 邮箱只能用一次（取件凭证是一次性的、平台只保留一封邮件）。
+    #
+    # ⚠️ 为什么注册流程要区别对待：
+    #    OpenAI 的注册链是「提交邮箱 → 服务端自动发码 → 设密码 → 补发第2封 →
+    #    verify → 建账户」。关键在于：**POST user/register（设密码）成功后，
+    #    服务端会切到 email_otp_send 页，之前自动发的那封 OTP 立即失效**
+    #    （拿它 verify 会 409 invalid_state）→ 所以必须主动补发第 2 封。
+    #
+    #    一次性邮箱**收不到第 2 封**（平台只保留一封）→ 补发也白补，
+    #    而且取件时若用「主动发码时刻」做时间窗下界，唯一那封还会被滤掉 → 死等超时。
+    #
+    #    所以一次性邮箱必须**跳过设密码**：不触发流程切换，第 1 封保持有效，
+    #    直接 verify 即可 —— 总共只需 1 封邮件。
+    #    代价：注册出来是无密码号（只能靠邮箱收码登录）。一次性邮箱本来就一次性，
+    #    邮箱失效后无密码号等于永久丢失，但 access_token 照拿。
+    #
+    # 默认 False（长效 / 普通邮箱不受影响）。
+    ephemeral_mailbox: bool = False
+
     # "OpenAI 说这个邮箱已经注册过了" 算不算失败。
     #   False（默认）想注册新号却撞上老号 → 这个号没用了，标记失败
     #   True          本来就是买的老号，走 passwordless_login 拿 token
@@ -223,11 +245,18 @@ class MailProvider(ABC):
         email_addr: str,
         timeout: int = 120,
         issued_after: Optional[float] = None,
+        earliest: Optional[float] = None,
     ) -> str:
         """阻塞等待 OTP，拿到返回 6 位码，超时抛 TimeoutError。
 
         issued_after 是防串号时间窗：只接受这个时间点之后到达的邮件，
         避免读到上一轮遗留的旧验证码。务必尊重这个参数。
+
+        earliest 是**本次注册流程开始**的时刻，用作一次性邮箱的下界兜底。
+        一次性邮箱（ephemeral_mailbox=True）只保留一封邮件，而那封通常是
+        服务端在「提交邮箱」时自动发的 —— 它比 issued_after（主动补发时刻）
+        早十几秒到达，用 issued_after 会把唯一那封也滤掉。
+        所以一次性邮箱应改用 earliest 做下界；普通邮箱忽略这个参数。
         """
         ...
 
