@@ -64,6 +64,15 @@ class AuthResult:
         self.refresh_token: str = ""
         self.cookie_header: str = ""
         self.totp_secret: str = ""
+        # /api/auth/session 的**完整响应 JSON 原文**。
+        #
+        # 为什么存整份而不只存 accessToken / sessionToken：
+        #   · expires —— access_token 的到期时间。丢了就没法提前判断
+        #     "这个号什么时候得重新注册"（尤其在关掉 refresh_token 之后）。
+        #   · user.id —— OpenAI 侧账号的唯一标识，比 email 更稳定。
+        #   · user.groups / idp / picture 等 —— 排查账号状态时用得上。
+        # 之前只提取了两个字段就丢弃了完整响应，这里补上。
+        self.session_json: str = ""
 
     def is_valid(self) -> bool:
         return bool(self.session_token and self.access_token)
@@ -80,6 +89,7 @@ class AuthResult:
             "refresh_token": self.refresh_token,
             "cookie_header": self.cookie_header,
             "totp_secret": self.totp_secret,
+            "session_json": self.session_json,
         }
 
 
@@ -2865,6 +2875,19 @@ class AuthFlow:
         return session_token, access_token
 
     def _consume_callback_for_session(self, callback_url: str) -> bool:
+        # 保存 session 接口的完整响应 JSON 原文（紧凑格式，一行）。
+        #
+        # ⚠️ 只在有内容时保存 —— 空 dict 存 "{}" 没意义，还会污染导出文件。
+        # ⚠️ 这里含 accessToken / sessionToken —— 凭证全集，别泄露。
+        if sess_json:
+            try:
+                self.result.session_json = json.dumps(
+                    sess_json, ensure_ascii=False, separators=(",", ":")
+                )
+            except Exception:  # noqa: BLE001
+                # 序列化失败不能拖垮注册（token 已经拿到了）
+                pass
+
         """主动 GET callback URL 让 chatgpt.com NextAuth 设 session cookie。
 
         协议层 follow_redirect_chain 故意不消费 callback（为后续 OAuth token exchange 留 code），

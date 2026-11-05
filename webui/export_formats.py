@@ -90,6 +90,34 @@ FORMATS: list[ExportFormat] = [
         ),
         note="取件链接含 token，等同收件权限，妥善保管",
     ),
+    # 直供 chatgpt2api 的「导入 Access Token」。chatgpt2api 那边解析
+    # 「access_token----代理」，带代理的账号走账号级代理（优先级最高）。
+    # 为什么要带代理：注册时用哪个 IP，就让这个号在 chatgpt2api 里也用哪个 IP ——
+    # 注册和使用 IP 不一致本身就可能被 OpenAI 的风控盯上。
+    # 没配代理的号留空（照约定"不跳行、分隔符保留"）。
+    ExportFormat(
+        id="at_proxy",
+        label="access_token----代理",
+        filename="AT_代理.txt",
+        render=lambda r: f'{_s(r, "access_token")}----{_s(r, "proxy")}',
+        note="直供 chatgpt2api 导入，让注册与使用同一个 IP",
+    ),
+    # /api/auth/session 的完整响应 JSON 原文，**一行一个账号**。
+    #
+    # 为什么单独导一份：这个 JSON 里同时有 accessToken / sessionToken /
+    # expires / user.id / user.groups 等 —— 比拆开的几列信息全，
+    # 拿去做账号归档、批量分析、或者喂给别的工具都方便。
+    #
+    # ⚠️ 它是**紧凑单行 JSON**（存的时候就是紧凑格式），所以一行一个不会串行，
+    #    可以直接按行 split 解析。
+    # ⚠️ 含 accessToken / sessionToken —— 等同凭证全集，文件请当密码保管。
+    ExportFormat(
+        id="session_json",
+        label="原始 session JSON（一行一个）",
+        filename="session_json.txt",
+        render=lambda r: _s(r, "session_json"),
+        note="session 接口完整响应，含 token 与 expires，务必妥善保管",
+    ),
 ]
 
 _BY_ID = {f.id: f for f in FORMATS}
