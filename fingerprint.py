@@ -50,7 +50,11 @@ _IOS_SAFARI_VERSIONS = [
         "ios_versions": ["18_0", "18_1", "18_1_1"],
     },
     {
-        "impersonate": "safari18_4_ios",
+        # ⚠️ curl_cffi 的命名规则是「无下划线的版本号」：safari18_4_ios 不存在，
+        #    正确写法是 safari184_ios。写错的话 curl_cffi 直接抛
+        #    "Impersonating safari18_4_ios is not supported"，
+        #    这个指纹 100% 失败（实测整轮 warmup 4 次全废）。
+        "impersonate": "safari184_ios",
         "safari_ver": "18.4",
         "webkit_ver": "605.1.15",
         "ios_versions": ["18_4", "18_4_1"],

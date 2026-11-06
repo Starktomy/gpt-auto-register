@@ -3149,12 +3149,17 @@ class AuthFlow:
                 "请检查代理后重试"
             )
 
-        # 创建邮箱
+        # 登录/注册链路
+        csrf_token = self.get_csrf_token()
+
+        # ── 下单邮箱 ──
+        # ⚠️ 下单放在**第 1 步之后、第 2 步之前**：
+        #    第 2 步 get_auth_url 要用 email 拼 login_hint（"预填邮箱"提示），
+        #    所以最晚只能晚到第 2 步前。往前挪到 warmup 之后（第 1 步之前）
+        #    只会让「第 1 步 CSRF 失败」也白下一个邮箱 —— 没意义。
         email = mail_provider.create_mailbox()
         self.result.email = email
 
-        # 登录/注册链路
-        csrf_token = self.get_csrf_token()
         auth_url = self.get_auth_url(csrf_token, email=email)
         device_id = self.auth_oauth_init(auth_url)
 
@@ -3162,13 +3167,26 @@ class AuthFlow:
         #
         # ⚠️ 为什么可重试：409 invalid_state 的服务端原文是
         #    "Your sign-in session is no longer valid. Please start over to continue."
-        #    —— 它本来就是要你**从头再来**。实测原因：warmup 拿到了 oai-did，
-        #    但中间隔着 PoW（19~21 秒），等 PoW 跑完 session 已经过期。
+        #    —— 它本来就是要你**从头再来**。
         #
-        #    重来一遍 = 换出口 IP 重新走 warmup + signup，**邮箱不用换**
-        #    （邮箱是花钱买的，重试同一个邮箱 = 不再浪费钱）。
-        #    实测日志里 3/10 的订单栽在这，每次 10 元 —— 重试能救回这 30%。
+        # 🔴 为什么旧实现救不回来（2026-11-06 实测 10 连续注册，6 次 409 全废）：
+        #    旧实现只做了「重建 session + 重新 warmup」，但**没刷新 device_id**。
+        #    device_id 在第 3 步 auth_oauth_init 时写进 self.result.device_id，
+        #    而 _common_headers 里取 device_id 的逻辑是：
+        #        self.result.device_id or self.session.cookies.get("oai-did")
+        #    —— `or` 短路，self.result.device_id 一旦有值就永远用它。
+        #    于是重建 session 后拿到的是**新的 oai-did cookie**，但请求头发出去的
+        #    还是**旧的 oai-device-id** → 服务端认定设备不一致 → invalid_state。
+        #    实测印证：warmup 第一次就成功、409 重试后 warmup 也第一次就成功，
+        #    照旧 409 —— 换的只是 session，从来没换过 device_id。
         #
+        # ✅ 现在用方案 B：重试时把 **第 1~3 步整个重跑**（csrf → auth_url →
+        #    oauth_init → 拿新的 device_id），再 warmup → PoW → submit。
+        #    这才真正符合服务端 "start over to continue" 的语义。
+        #    代价是每次重试多花 ~10 秒（csrf + auth_url + oauth_init），
+        #    但换来的是从"必然 409"变成"可能救回"。
+        #
+        # ⚠️ 邮箱不换：重试复用同一个邮箱（邮箱是花钱买的，重试不额外花钱）。
         # ⚠️ 只对 invalid_state 重试。user_already_exists 这类业务拒绝
         #    重试多少次都没用（邮箱本身废了），不该在这里空转。
         max_attempts = 3  # 首次 + 2 次重试
@@ -3176,7 +3194,11 @@ class AuthFlow:
         last_err = ""
         for attempt in range(1, max_attempts + 1):
             try:
+                # ── 第 4 步：PoW ──
                 sentinel = self.get_sentinel_token(device_id)
+
+                # ── 第 5 步：提交注册邮箱 ──
+                # ⚠️ email 在循环外就已创建（重试复用同一个，不重复下单）
                 is_new = self.signup(email, sentinel)
                 break
             except Exception as e:  # noqa: BLE001
@@ -3191,21 +3213,40 @@ class AuthFlow:
                     raise
                 logger.warning(
                     f"signup 撞 invalid_state（第 {attempt}/{max_attempts} 次），"
-                    f"换出口 IP 重来 —— 邮箱复用，不额外花钱"
+                    f"从头再来（重建会话 + 刷新 device_id）—— 邮箱复用，不额外花钱"
                 )
-                # 换出口 IP：重建 session（新的 oai-did）并重新 warmup
+                # ── 从头再来：重建 session（新的 oai-did）──
                 time.sleep(3 + attempt * 2)
                 self.session = create_http_session(
                     proxy=self.config.proxy,
                     impersonate=self._impersonate_candidates[self._impersonate_idx],
                     user_agent=self._ua,
                 )
+                # 🔴 清掉上一轮的会话身份，否则 _common_headers 会一直用旧值
+                #    （`self.result.device_id or cookies["oai-did"]`，or 短路）。
+                #    不清 → 新 cookie + 旧 device-id → 必然又 409（实测 6/6）。
+                self.result.device_id = ""
+                self._last_sentinel_so_token = ""
+
                 if not self.warmup():
                     raise RuntimeError(
                         "warmup 失败：4 次重试均未拿到 chatgpt.com 的 oai-did cookie，"
                         "继续注册必然 409 invalid_state（多为代理出口 IP 不通或被 CF 拦），"
                         "请检查代理后重试"
                     )
+
+                # ── 重跑第 1~3 步：拿新的 csrf / auth_url / device_id ──
+                # ⚠️ device_id 必须刷新：authorize/continue 的 oai-device-id 头
+                #    要和当前 session 的 oai-did 一致，否则服务端判设备不一致。
+                #    auth_url 也得重拿 —— 它是 auth.openai.com/authorize 的入口，
+                #    里面的 state 跟 device_id 绑定。
+                csrf_token = self.get_csrf_token()
+                auth_url = self.get_auth_url(csrf_token, email=email)
+                device_id = self.auth_oauth_init(auth_url)
+                logger.info(
+                    f"[重试] 会话已刷新 device_id={device_id[:16]}...，"
+                    f"继续第 4 步（PoW）"
+                )
 
         # 号池邮箱被 OpenAI 标"已有账号" 处理策略:
         #   WEBUI_ALLOW_LOGIN=1 (promo-link 等需要拿 access_token 的模式) → 走 OTP login 拿凭证
