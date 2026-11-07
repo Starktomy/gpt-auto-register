@@ -464,6 +464,8 @@ class TestWebUIAuth:
             "/api/settings/sms",
             "/api/settings/export",
             "/api/auto/status",
+            "/api/payment/profiles",
+            "/api/payment/link",
         }
         assert expected <= paths
 

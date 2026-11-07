@@ -296,6 +296,54 @@ def cmd_registered(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_payment_link(args: argparse.Namespace) -> int:
+    """Generate a Plus/Team checkout link for a registered account."""
+    from regix.services.payment import PaymentLinkError, generate_payment_link_for_account
+
+    try:
+        link = generate_payment_link_for_account(
+            args.email,
+            plan=args.plan,
+            profile=args.profile,
+            country=args.country,
+            currency=args.currency,
+            locale=args.locale,
+            workspace_name=args.workspace_name,
+            interval=args.interval,
+            seats=args.seats,
+            promo_code=args.promo_code,
+            proxy=args.proxy,
+            timeout_seconds=args.timeout,
+        )
+    except PaymentLinkError as exc:
+        print(f"error: {exc.code}", file=sys.stderr)
+        return 1
+    _print_json(link.to_dict(), show_secrets=args.show_secrets)
+    return 0
+
+
+def cmd_payment_profiles(args: argparse.Namespace) -> int:
+    from regix.services.payment import PAYMENT_PROFILES
+
+    _print_json(
+        {
+            "items": [
+                {
+                    "id": item.id,
+                    "label": item.label,
+                    "country": item.country,
+                    "currency": item.currency,
+                    "locale": item.locale,
+                    "note": item.note,
+                }
+                for item in PAYMENT_PROFILES
+            ]
+        },
+        show_secrets=args.show_secrets,
+    )
+    return 0
+
+
 def _http_request(args: argparse.Namespace) -> int:
     url = args.base_url.rstrip("/") + "/" + args.path.lstrip("/")
     data = None
@@ -387,6 +435,26 @@ def build_parser() -> argparse.ArgumentParser:
     registered.add_argument("--offset", type=int, default=0)
     _add_common_output(registered)
     registered.set_defaults(func=cmd_registered)
+
+    payment_link = sub.add_parser("payment-link", help="为已注册账号生成 Plus/Team 支付链接")
+    payment_link.add_argument("email", help="已注册账号的邮箱")
+    payment_link.add_argument("--plan", choices=("plus", "team"), default="plus")
+    payment_link.add_argument("--profile", default="", help="支付区域预设 id，例如 paypal_de")
+    payment_link.add_argument("--country", default="", help="账单国家，优先于 profile")
+    payment_link.add_argument("--currency", default="", help="账单币种，优先于 profile")
+    payment_link.add_argument("--locale", default="", help="支付页语言标签")
+    payment_link.add_argument("--workspace-name", default="", help="Team 工作区名称")
+    payment_link.add_argument("--interval", choices=("month", "year"), default="month")
+    payment_link.add_argument("--seats", type=int, default=2, help="Team 席位数")
+    payment_link.add_argument("--promo-code", default="", help="优惠码")
+    payment_link.add_argument("--proxy", default="", help="代理；留空则用该号注册时的代理")
+    payment_link.add_argument("--timeout", type=float, default=20.0)
+    _add_common_output(payment_link)
+    payment_link.set_defaults(func=cmd_payment_link)
+
+    payment_profiles = sub.add_parser("payment-profiles", help="列出支付区域预设")
+    _add_common_output(payment_profiles)
+    payment_profiles.set_defaults(func=cmd_payment_profiles)
 
     api = sub.add_parser("api", help="调用 WebUI API（覆盖未单独封装的功能）")
     api.add_argument("method", choices=("get", "post", "patch", "delete"))

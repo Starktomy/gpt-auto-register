@@ -12,6 +12,7 @@ import { useFormStore, proxyText } from '@/stores/form'
 import { useProxyStore } from '@/stores/proxy'
 import { useRuntimeStore } from '@/stores/runtime'
 import StatusDot from '@/components/StatusDot.vue'
+import PaymentLinkDialog from '@/components/PaymentLinkDialog.vue'
 
 const formStore = useFormStore()
 const { form } = storeToRefs(formStore)
@@ -393,6 +394,24 @@ async function saveEdit() {
   } finally { editSaving.value = false }
 }
 
+// ── 生成支付链接（独立按钮，不混进检测/导出流程）──
+// 一次只能给一个号生成：checkout session 是**按账号**建的，
+// 批量生成会让页面上的链接和账号对不上号。
+const payVisible = ref(false)
+const payEmail = ref('')
+function openPaymentLink() {
+  if (!selected.value.length) {
+    ElMessage.info('请先在表格里选中一个账号')
+    return
+  }
+  if (selected.value.length > 1) {
+    ElMessage.info('一次只能生成一个账号的支付链接，请只选一个')
+    return
+  }
+  payEmail.value = selected.value[0].email
+  payVisible.value = true
+}
+
 watch(page, () => load())
 watch(dataVersion, () => load())
 onActivated(() => {
@@ -430,6 +449,10 @@ onActivated(() => {
         <el-button :loading="checking" @click="doCheck('all')">重新检查</el-button>
         <el-button :loading="checking" :disabled="!selected.length" @click="doCheck('selected')">
           检测选中 ({{ selected.length }})
+        </el-button>
+        <!-- 独立按钮：生成 Plus/Team 支付链接。和检测/导出互不影响。 -->
+        <el-button type="primary" plain @click="openPaymentLink">
+          <el-icon><Link /></el-icon>生成支付链接
         </el-button>
         <el-divider direction="vertical" />
         <el-dropdown trigger="click" @command="doExport" @visible-change="(v) => v && loadExportFormats()">
@@ -653,6 +676,8 @@ onActivated(() => {
           <el-button type="primary" :loading="editSaving" @click="saveEdit">保存</el-button>
         </template>
       </el-dialog>
+
+      <PaymentLinkDialog v-model="payVisible" :email="payEmail" />
     </el-card>
   </div>
 </template>

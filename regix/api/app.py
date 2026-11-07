@@ -21,6 +21,7 @@ from .routers import (
     auto_loop,
     exports,
     mail,
+    payment,
     proxies,
     registration,
     sms,
@@ -98,6 +99,7 @@ app.include_router(mail.router)
 app.include_router(sms.router)
 app.include_router(exports.router)
 app.include_router(auto_loop.router)
+app.include_router(payment.router)
 
 
 @app.get("/api/health")

@@ -121,6 +121,10 @@ regix-webui
 > ⚠️ 所有界面数据都存后端 SQLite（`settings.prefs` / `proxy_pool` / `remail_orders`），
 > 不再依赖浏览器 localStorage —— 换机器、清缓存后依然保留。
 
+「注册结果」页有一个独立按钮 **生成支付链接**：选中一个号 → 选套餐（Plus / Team）
+和支付区域 → 生成三条链接（`pay.openai.com` 长链、`checkout.stripe.com` 镜像、
+`chatgpt.com/checkout` 内部链接）。详见下方「生成支付链接」。
+
 ## 邮箱来源
 
 WebUI「⚙️ 设置 → 邮箱配置」里下拉切换，后端 provider 声明配置项，前端动态渲染。
@@ -179,6 +183,28 @@ WebUI「⚙️ 设置 → 邮箱配置」里下拉切换，后端 provider 声�
 > 极易触发 409 `invalid_state` 与风控。**建议使用粘性会话（sticky session）代理**——
 > 让一次注册全程固定同一个出口 IP。
 
+## 生成支付链接
+
+给已注册账号生成 ChatGPT Plus / Team 的支付链接，走的是 OpenAI 官方 checkout
+接口 + Stripe `payment_pages/init`，拿到带 `#fid` 片段的完整长链。
+
+WebUI：「注册结果」页 → 选中**一个**号 → 点 **生成支付链接**。
+CLI：`regix payment-link <email> [--plan plus|team] [--profile paypal_de] [--country XX] [--currency XXX]`。
+
+> 凭证不出后端：前端只传邮箱和选项，access_token / cookie / device_id 由后端
+> 从本地库里读。
+
+**账单国家必须与请求出口 IP 的国家一致**，否则 OpenAI 直接拒
+（`Billing country must match request country`）。弹窗会自动选中当前出口 IP
+所在国家；要用别的区域（如欧元区看 PayPal），得先让这个号走对应地区的代理。
+
+实测结论（2026-11）：
+
+- `pay.openai.com` 长链、`checkout.stripe.com` 镜像、`chatgpt.com/checkout`
+  内部链接三条都能正常打开（HTTP 200，真实 Stripe 支付页）。
+- 个别账号会被 OpenAI 风控拦（`Our systems have detected unusual activity`），
+  这是**账号级**判定，换请求头/换 TLS 指纹都没用，换出口 IP 或稍后再试。
+
 ## 导出格式
 
 「导出配置」菜单可选择格式，批量导出多账号。
@@ -236,6 +262,9 @@ regix status                   # 查看号池、代理、偏好和运行中任�
 regix accounts --status available
 regix runs --limit 10
 regix registered --limit 10
+regix payment-link <email>          # 生成 Plus/Team 支付链接
+regix payment-link <email> --plan team --seats 5 --interval year
+regix payment-profiles              # 列出支付区域预设（国家/币种）
 regix api get /api/settings/prefs   # Basic 认证读取 WEBUI_ADMIN_USERNAME / PASSWORD
 ```
 
@@ -354,7 +383,7 @@ API 令牌写入 `Authorization`，客户端会先尝试原始值，遇到 401 �
 | `regix/providers/mail/` | Remail / Outlook / Cloudflare / iCloud 邮箱 provider |
 | `regix/providers/sms/` | SmsBower / HeroSMS / API668、国家映射、工厂与两阶段回调 |
 | `regix/storage/` | SQLite 仓储：号池、registered、代理池、Remail 订单、runs、设置 |
-| `regix/services/` | 注册 worker、自动循环、导出、2FA 服务 |
+| `regix/services/` | 注册 worker、自动循环、导出、2FA 服务、支付链接（`payment.py`） |
 | `regix/api/` | FastAPI app factory 与按领域拆分的 routers |
 | `regix/cli/` | `regix` 命令行入口 |
 | `webui/frontend/` | Vue 3 + Element Plus 前端源码 |

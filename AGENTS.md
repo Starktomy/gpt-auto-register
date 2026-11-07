@@ -179,6 +179,32 @@ OpenAI routes most countries to WhatsApp. Pure SMS currently works only for
 Thailand (`country_id=52` / `sms_country=52`). Warn, do not silently retry,
 when auto-selection cannot find a whitelisted country.
 
+### 2.13 Payment links: the billing country must match the exit IP
+
+`POST /backend-api/payments/checkout` compares `billing_details.country`
+against the country the request **exits from**. A preset that does not match
+is rejected with HTTP 400 and the body
+`Billing country must match request country.`
+
+That body and a risk block share the same status code, so
+`_classify_checkout_error()` in `regix/services/payment.py` splits them by
+message text:
+
+| Response text | Error code | Meaning |
+| --- | --- | --- |
+| `Billing country must match request country.` | `checkout_country_mismatch` | the chosen preset does not fit the exit IP |
+| `Our systems have detected unusual activity.` | `checkout_risk_blocked` | OpenAI's risk engine flagged the account or its exit IP |
+
+The risk block is **per account, not per request shape**. Measured on five
+freshly registered accounts from the same exit IP: four returned it for every
+combination of headers, cookies, TLS impersonation and country; one worked
+every time. Do not try to "fix" it by reshuffling request headers, and do not
+retry it in a loop — it only burns quota on the exit IP.
+
+`detect_exit_country()` resolves the exit country through the *same proxy* the
+checkout request would use. The WebUI shows it next to the preset list and
+warns before the request when the chosen preset disagrees with it.
+
 ---
 
 ## 3. Architecture
@@ -261,6 +287,65 @@ category that decides what happens to the mailbox and the proxy:
 
 Do not replace this with ad-hoc string matching at the call site; the table
 above is the contract between the worker and the account pool.
+
+### 3.4 Payment links
+
+`regix/services/payment.py` creates a Stripe checkout session for a Plus or
+Team subscription and returns every link that belongs to it. The flow mirrors
+the reference toolbox (`1837620622/chatgpt-specimen-toolbox`) and has three
+steps:
+
+1. `POST https://chatgpt.com/backend-api/payments/checkout` with the
+   account's access token. Returns `checkout_session_id`, `client_secret`,
+   `publishable_key` and `processor_entity`. `url` is usually `null` in
+   `hosted` mode.
+2. `POST https://api.stripe.com/v1/payment_pages/{cs_id}/init` (form
+   encoded, `Authorization: Bearer <publishable_key>`). Returns
+   `stripe_hosted_url`.
+3. Rewrite the host `checkout.stripe.com` -> `pay.openai.com`.
+
+Step 2 is not optional. OpenAI's `hosted` mode regularly returns a URL
+without the `#fid` fragment, and a long link rebuilt from `client_secret`
+alone then refuses to open. Only Stripe's own init response carries the
+authoritative fragment. When the init call fails the service degrades to the
+URL from step 1 (or one rebuilt from the client secret) and reports the
+reason through `PaymentLink.warnings`; it does not fail the whole request.
+
+Request body rules for step 1 (they are exact, do not add fields):
+
+- Send: `plan_name`, `checkout_ui_mode` (`hosted`), `billing_details`
+  (`country` + `currency`), `cancel_url`. Team adds `team_plan_data`
+  (`workspace_name`, `price_interval`, `seat_quantity`).
+- Never send: `success_url` (ChatGPT decides the return path itself, and a
+  wrong one sends PayPal to a "register a new account" page),
+  `entry_point` / `promo_campaign` (they corrupt the Stripe session and the
+  long link stops opening), `locale` (it follows the browser), and
+  `check_card_proxy` (retired field).
+
+Links produced by `build_payment_urls()`:
+
+| Key | Form | Use |
+| --- | --- | --- |
+| `openai` / `external` | `https://pay.openai.com/c/pay/{cs}#fid...` | standalone long link, opens in a clean browser |
+| `stripe` | `https://checkout.stripe.com/c/pay/{cs}#fid...` | mirror of the same session on Stripe's own host |
+| `internal` | `https://chatgpt.com/checkout/{entity}/{cs}` | ChatGPT wrapper, only works in the account's own logged-in browser |
+
+`processor_entity` is `openai_ie` for the eurozone/UK and `openai_llc`
+elsewhere; the response carries it, `infer_merchant_path()` is the fallback
+derived from the billing country.
+
+**Credentials never leave the backend.** The WebUI and the CLI send the
+account email plus the payment options; the access token, the chatgpt.com
+cookie header and the device id are read from the `registered` row inside
+`generate_payment_link_for_account()`, and the proxy falls back to the proxy
+the account was registered with.
+
+Front end: `POST /api/payment/link` and `GET /api/payment/profiles` in
+`regix/api/routers/payment.py`; the WebUI button lives in
+`webui/frontend/src/views/Registered.vue` and opens
+`webui/frontend/src/components/PaymentLinkDialog.vue`. One account per click:
+a checkout session belongs to one account, so a batch would produce links
+that do not match the account they are shown next to.
 
 ---
 
@@ -345,6 +430,9 @@ regix status                          # pool, proxy, prefs, running tasks
 regix accounts --status available
 regix runs --limit 10
 regix registered --limit 10
+regix payment-link <email>             # Plus/Team checkout links
+regix payment-link <email> --plan team --seats 5 --interval year
+regix payment-profiles                 # list the country/currency presets
 regix api get /api/settings/prefs     # passthrough for everything else
 regix legacy 'email----pass----cid----refresh_token'
 ```
@@ -356,6 +444,9 @@ regix legacy 'email----pass----cid----refresh_token'
   lines unless `--show-secrets` is given.
 - `regix legacy` (also installed as `regix-legacy`) is the old four-field
   Outlook runner. Keep it working; it is the documented escape hatch.
+- `regix payment-link` reads the token from the local database, so it needs
+  no credential on the command line. The billing country follows the exit IP
+  (see 2.13); `--profile`/`--country` only make sense when they match it.
 - The console scripts are declared in `pyproject.toml`. If you change them,
   remember that an editable install in a venv without pip keeps the old
   generated script until it is regenerated.
@@ -381,6 +472,11 @@ regix legacy 'email----pass----cid----refresh_token'
   The hashed filenames change on every build, so `webui/static/index.html` and
   the asset directory must be committed together. Verify that every asset
   referenced by `webui/static/index.html` exists.
+- The "注册结果" page carries one standalone button, "生成支付链接", which
+  creates a Plus/Team checkout link for the selected account (see 3.4). It
+  needs exactly one selected row; the dialog picks the payment preset that
+  matches the current exit country and shows the long link, its Stripe
+  mirror and the ChatGPT wrapper.
 
 ---
 
