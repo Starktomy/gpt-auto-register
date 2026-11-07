@@ -121,6 +121,9 @@ regix-webui
 > ⚠️ 所有界面数据都存后端 SQLite（`settings.prefs` / `proxy_pool` / `remail_orders`），
 > 不再依赖浏览器 localStorage —— 换机器、清缓存后依然保留。
 
+前端资源按内容哈希命名，静态文件带 `immutable` 长缓存；HTML 走 `no-cache`，
+发布后立即生效。传输层开启 gzip，首屏（仪表盘）约 170KB。
+
 「注册结果」页有一个独立按钮 **生成支付链接**：选中一个号 → 选套餐（Plus / Team）
 和支付区域 → 生成三条链接（`pay.openai.com` 长链、`checkout.stripe.com` 镜像、
 `chatgpt.com/checkout` 内部链接）。详见下方「生成支付链接」。

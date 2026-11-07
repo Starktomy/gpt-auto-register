@@ -7,12 +7,13 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 // 构建产物直接输出到 ../static，交给 FastAPI（未来换 Go 的 Gin 同样一行伺服）。
 // dev 模式下把 /api 代理到本地 FastAPI，方便热更新开发。
-// 按需引入 Element Plus 组件/指令（importStyle:false → 保留全量 CSS，仅 tree-shake JS）。
+// 按需引入 Element Plus 组件/指令，样式也按需（importStyle:'css'）。
+// 全量 CSS 有 358KB；按需后只剩实际用到的组件，首屏 CSS 大幅变小。
 export default defineConfig({
   plugins: [
     vue(),
-    AutoImport({ resolvers: [ElementPlusResolver({ importStyle: false })] }),
-    Components({ resolvers: [ElementPlusResolver({ importStyle: false })] }),
+    AutoImport({ resolvers: [ElementPlusResolver({ importStyle: 'css' })] }),
+    Components({ resolvers: [ElementPlusResolver({ importStyle: 'css' })] }),
   ],
   // FastAPI 在 /static 挂载静态资源，index.html 在 / 返回，故 base 用 /static/
   base: '/static/',

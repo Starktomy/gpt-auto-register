@@ -1,8 +1,11 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 
-// 保留全量 CSS（保证 ElMessage/ElMessageBox 等程序式组件样式），JS 由 unplugin 按需 tree-shake
-import 'element-plus/dist/index.css'
+// Element Plus 样式按需引入（vite 插件会给模板里用到的组件自动加样式）。
+// 程序式调用的 ElMessage / ElMessageBox / v-loading 不经过模板解析，必须手动引入。
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
+import 'element-plus/es/components/loading/style/css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import './styles/theme.css'
 import 'nprogress/nprogress.css'

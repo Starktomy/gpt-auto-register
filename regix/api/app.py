@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -100,6 +101,34 @@ app.include_router(sms.router)
 app.include_router(exports.router)
 app.include_router(auto_loop.router)
 app.include_router(payment.router)
+
+
+# 首屏主要是那两坨 bundle（JS ~400KB / CSS ~358KB）。文本压缩比很高：
+#   JS 400KB -> ~147KB，CSS 358KB -> ~50KB，响应体积直接砍到 1/4。
+# minimum_size 给 1024，小 JSON / SSE 心跳不压缩（SSE 不能缓冲）。
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    """Hashed bundles can be cached forever; the shell and API cannot.
+
+    Vite puts a content hash in every bundle name, so a cached copy can never
+    be stale — a new build produces a new URL. ``index.html`` must revalidate
+    so a deploy is picked up immediately, and JSON API answers must not be
+    cached by the browser.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/assets/"):
+        response.headers["cache-control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static/"):
+        response.headers["cache-control"] = "public, max-age=86400"
+    elif path == "/" or path.endswith(".html"):
+        response.headers["cache-control"] = "no-cache"
+    elif path.startswith("/api/") and path != "/api/auto/stream":
+        response.headers.setdefault("cache-control", "no-store")
+    return response
 
 
 @app.get("/api/health")

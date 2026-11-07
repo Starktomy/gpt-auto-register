@@ -572,6 +572,19 @@ regix legacy 'email----pass----cid----refresh_token'
   The hashed filenames change on every build, so `webui/static/index.html` and
   the asset directory must be committed together. Verify that every asset
   referenced by `webui/static/index.html` exists.
+- Delivery settings are part of the page weight:
+  - `GZipMiddleware(minimum_size=1024)` compresses bundles and JSON. Never
+    compress SSE (`/api/auto/stream`) - buffering breaks the stream.
+  - Hashed files under `/static/assets/` are served with
+    `Cache-Control: public, max-age=31536000, immutable`; `index.html` is
+    `no-cache` so a deploy is picked up immediately. Do not make the shell
+    cacheable.
+  - Element Plus CSS is imported on demand (`ElementPlusResolver({
+    importStyle: 'css' })`). The full `element-plus/dist/index.css` is 358 KB;
+    keeping the on-demand setup brings the shared CSS to about 100 KB.
+    Programmatic components bypass template resolution, so their styles are
+    imported explicitly in `main.js` (message, message-box, loading). Add the
+    style import there if another programmatic component is introduced.
 - The "注册结果" page carries one standalone button, "生成支付链接", which
   creates a Plus/Team checkout link for the selected account (see 3.4). It
   needs exactly one selected row; the dialog picks the payment preset that
