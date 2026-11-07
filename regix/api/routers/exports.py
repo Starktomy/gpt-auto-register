@@ -241,6 +241,10 @@ def api_bind_2fa(req: Bind2FAReq):
         reason = str(info.get("reason") or "unknown")
         messages = {
             "already_bound": "该号已有 2FA secret；当前页面先支持添加，不覆盖已有 secret",
+            "already_bound_unknown_secret": (
+                "该账号在 OpenAI 侧已经启用 2FA，但本地没有 secret，无法自动应答登录挑战。"
+                "请先在 ChatGPT 网页端关闭 2FA，再重新点「绑定2FA」"
+            ),
             "password_missing": "该号没有密码，无法程序化补绑 2FA",
             "mail_credentials_missing": "号池里找不到这个号的邮箱凭证，收不到验证码",
             "bind_failed": "补绑失败：登录/接码/激活有一条没通过，详见运行日志",

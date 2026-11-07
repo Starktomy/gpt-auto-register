@@ -100,6 +100,26 @@ def test_add_totp_refuses_to_overwrite_existing_secret(clean_db):
     assert clean_db.get_registered("has2fa@example.com")["totp_secret"] == "JBSWY3DPEHPK3PXP"
 
 
+def test_add_totp_reports_server_side_mfa_without_local_secret(monkeypatch, clean_db):
+    """Login stops at mfa-challenge -> tell the user the server has a factor
+    we cannot answer, instead of a generic failure."""
+    import regix.services.two_factor as tf
+    import regix.services.codex_login as cl
+
+    clean_db.save_registered(
+        {"email": "lost@example.com", "access_token": _jwt(), "password": "pw"}
+    )
+
+    def _boom(*args, **kwargs):
+        raise cl.CodexLoginError("协议登录完成，但未拿到有效 session/access token")
+
+    monkeypatch.setattr(cl, "login_and_exchange", _boom)
+    monkeypatch.setattr(tf, "_server_mfa_enabled", lambda row, proxy="": True)
+    info = tf.add_totp_2fa("lost@example.com")
+    assert info["ok"] is False
+    assert info["reason"] == "already_bound_unknown_secret"
+
+
 class _Resp:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code

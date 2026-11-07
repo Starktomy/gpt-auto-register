@@ -362,6 +362,43 @@ def bind_totp_2fa(
 
 
 # ── 给【已注册的老号】补绑 2FA（一键添加）──────────────────────────
+def _server_mfa_enabled(row: dict, proxy: str = "") -> bool:
+    """Best effort: ask OpenAI whether this account has 2FA enabled.
+
+    Used only to improve the error message when the login chain stops at
+    ``mfa-challenge``. A DB without a secret can still have a live factor on
+    the server (for example when the secret was lost after enrollment), and
+    that state cannot be repaired from here: the challenge needs the very
+    code we do not have.
+    """
+    token = str((row or {}).get("access_token") or "").strip()
+    if not token:
+        return False
+    session = None
+    try:
+        from regix.http.client import create_http_session
+
+        session = create_http_session(proxy=proxy or None, impersonate="chrome110")
+        response = session.get(
+            "https://chatgpt.com/backend-api/accounts/mfa_info",
+            headers={
+                "accept": "application/json",
+                "authorization": f"Bearer {token}",
+                "oai-device-id": str(row.get("device_id") or "00000000-0000-4000-8000-000000000000"),
+            },
+            timeout=15,
+        )
+        return response.status_code == 200 and bool((response.json() or {}).get("mfa_enabled"))
+    except Exception:
+        return False
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
 def add_totp_2fa(
     email: str,
     *,
@@ -407,6 +444,8 @@ def add_totp_2fa(
         )
     except CodexLoginError as exc:
         logger.warning("[2fa] %s 重登失败: %s", normalized, exc)
+        if _server_mfa_enabled(row, effective_proxy):
+            return {"ok": False, "reason": "already_bound_unknown_secret", "email": normalized}
         return {"ok": False, "reason": "login_failed", "email": normalized}
     except Exception as exc:  # noqa: BLE001
         logger.warning("[2fa] %s 重登异常: %s", normalized, exc)
