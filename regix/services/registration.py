@@ -425,6 +425,10 @@ def _do_register(
         d = {
             "email": full.get("email", ""),
             "password": full.get("password", ""),
+            # device_id 是 oai-did（设备标识）。不落库的话，下次用这个号
+            # 重新登录/调接口时只能现生成一个，和当初注册时的设备对不上 ——
+            # 早期那批账号的 registered.device_id 全是空的就是这个原因。
+            "device_id": full.get("device_id", ""),
         }
         if options.get("want_access_token", True):
             d["access_token"] = full.get("access_token", "")

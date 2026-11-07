@@ -116,11 +116,16 @@ class RegistrationMixin:
                 )
                 # ── 从头再来：重建 session（新的 oai-did）──
                 time.sleep(3 + attempt * 2)
-                self.session = create_http_session(
-                    proxy=self.config.proxy,
-                    impersonate=self._impersonate_candidates[self._impersonate_idx],
-                    user_agent=self._ua,
-                )
+                # 🔴 必须连指纹一起换：CF 403 是指纹级的（safari260 必 403，
+                #    同 IP 同 URL 换 chrome146/safari18_0 都是 200）。
+                #    原来这里只重建 session、指纹不变 → 3 次重试全撞同一堵墙，
+                #    实测 3 次全是同一个 403 → invalid_state。
+                if not self._rotate_impersonate_session():
+                    self.session = create_http_session(
+                        proxy=self.config.proxy,
+                        impersonate=self._impersonate_candidates[self._impersonate_idx],
+                        user_agent=self._ua,
+                    )
                 # 🔴 清掉上一轮的会话身份，否则 _common_headers 会一直用旧值
                 #    （`self.result.device_id or cookies["oai-did"]`，or 短路）。
                 #    不清 → 新 cookie + 旧 device-id → 必然又 409（实测 6/6）。

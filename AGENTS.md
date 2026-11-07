@@ -195,15 +195,62 @@ message text:
 | `Billing country must match request country.` | `checkout_country_mismatch` | the chosen preset does not fit the exit IP |
 | `Our systems have detected unusual activity.` | `checkout_risk_blocked` | OpenAI's risk engine flagged the account or its exit IP |
 
-The risk block is **per account, not per request shape**. Measured on five
-freshly registered accounts from the same exit IP: four returned it for every
-combination of headers, cookies, TLS impersonation and country; one worked
-every time. Do not try to "fix" it by reshuffling request headers, and do not
-retry it in a loop — it only burns quota on the exit IP.
+The risk block is **per account, not per request shape and not per IP**.
+Measured on five accounts from the same exit IP:
+
+- The account created first (20:01) can create checkout sessions; the four
+  created later the same evening (20:41 - 21:36) cannot.
+- Changing the exit IP for the checkout request does not help: three pool
+  proxies (exit IPs 50.127.113.71 / 71.57.138.120 / 35.150.235.178), the host
+  IP, and `hosted` as well as `custom` checkout mode all returned the same
+  400.
+- The sessions of the blocked accounts are **valid**: `GET /api/auth/session`
+  returns 200 with the right user and `GET /backend-api/accounts/check/...`
+  returns 200 for all of them. The marker is OpenAI's risk engine, not a
+  broken credential and not the Codex OAuth chain (the one working account has
+  a refresh token and id token, and so does one of the blocked ones).
+
+Do not try to "fix" it by reshuffling request headers, by re-login, or by
+retrying in a loop — it only burns quota on the exit IP. The lever that does
+work is **signup-side**: the accounts that were created from an already
+distrusted exit IP inherit the marker, so register and pay from the same
+clean proxy.
 
 `detect_exit_country()` resolves the exit country through the *same proxy* the
 checkout request would use. The WebUI shows it next to the preset list and
 warns before the request when the chosen preset disagrees with it.
+
+### 2.14 A Cloudflare 403 at the OAuth init is fingerprint-level
+
+`[3/10] OAuth 初始化完成 status=403` (the final URL stays on
+`https://auth.openai.com/oauth/authorize`) is **not** an IP problem. Measured
+2026-11-07 on one exit IP, one URL, only the TLS impersonation changed:
+
+| Impersonation | Result |
+| --- | --- |
+| `chrome110` / `chrome136` / `chrome146` / `chrome150` | 200 |
+| `safari18_0` | 200 |
+| `firefox144` | 200 |
+| `safari260` | **403** |
+
+A 403 there dooms the whole registration: the next step
+(`authorize/continue`) answers `409 invalid_state` because the authorize state
+was never established. The `invalid_state` retry in `run_register` used to
+rebuild the session and refresh the device id but **keep the same
+impersonation**, so all three attempts hit the same wall (observed: three
+identical 403s, then the mailbox was wasted).
+
+Two rules follow:
+
+- `auth_oauth_init()` rotates to the next same-family impersonate when it
+  sees a 403 and retries the request in place. No mailbox, no device id and no
+  exit IP is touched by that rotation.
+- The `invalid_state` retry in `run_register` rotates the impersonation too.
+  Without it the retry is a no-op against a fingerprint-level block.
+
+Do not "fix" a 403 here by adding headers or by rebuilding the session: the
+block follows the impersonation. The regression test is
+`tests/test_oauth_fingerprint.py`.
 
 ---
 
@@ -375,6 +422,12 @@ Storage rules:
   database (see the `ALTER TABLE` pattern for `totp_secret` / `kind`).
 - `session_json` and `extra_json` are stored separately on purpose: exports
   need the raw session, the UI needs the metadata.
+- `device_id` is the `oai-did` of the account. It must be written to the
+  `registered` row: without it a later login or API call for that account
+  cannot reuse the device the account was created with. The registrar's
+  result whitelist in `regix/services/registration.py` used to drop it (the
+  accounts registered before 2026-11-07 have an empty `device_id`); keep it in
+  the whitelist and keep the `save_registered` column mapping.
 
 ---
 

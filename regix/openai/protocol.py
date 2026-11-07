@@ -246,14 +246,35 @@ class ProtocolMixin:
         保证 client hints 与 self._fingerprint / self._ua 同族。
         """
         logger.info("[3/10] OAuth 初始化...")
-        headers = self._navigation_headers()
-        headers["Referer"] = "https://chatgpt.com/"
-        # chatgpt.com -> auth.openai.com 是跨站跳转，不是首次直达
-        headers["sec-fetch-site"] = "cross-site"
-        # 302 自动跟随不是用户手动点击，真浏览器此时不发 sec-fetch-user
-        headers.pop("sec-fetch-user", None)
+
+        def _nav_headers() -> dict:
+            h = self._navigation_headers()
+            h["Referer"] = "https://chatgpt.com/"
+            # chatgpt.com -> auth.openai.com 是跨站跳转，不是首次直达
+            h["sec-fetch-site"] = "cross-site"
+            # 302 自动跟随不是用户手动点击，真浏览器此时不发 sec-fetch-user
+            h.pop("sec-fetch-user", None)
+            return h
+
+        headers = _nav_headers()
         resp = self.session.get(auth_url, headers=headers, timeout=30, allow_redirects=True)
         self._trace_http("auth_oauth_init", resp)
+
+        # 🔴 Cloudflare 403 在这里是**指纹级**的，不是 IP 级（2026-11-07 实测）：
+        #    同一出口 IP、同一 URL、只换 TLS 指纹 →
+        #        safari260 = 403，chrome110/136/146/150、safari18_0、firefox144 = 200
+        #    撞上被拦的指纹时，authorize/continue 必然 409 invalid_state，
+        #    而下面那次「重试」换的只是 device_id，**指纹没换** → 3 次撞同一堵墙。
+        #    这里就地换同族回退指纹重试：不换邮箱、不换 device_id、不换出口 IP。
+        for _ in range(2):
+            if resp.status_code != 403:
+                break
+            if not self._rotate_impersonate_session():
+                break
+            headers = _nav_headers()
+            resp = self.session.get(auth_url, headers=headers, timeout=30, allow_redirects=True)
+            self._trace_http("auth_oauth_init", resp)
+
         final_url = str(resp.url)
         self._oauth_init_final_url = final_url
         logger.info(
