@@ -31,8 +31,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -43,10 +45,37 @@ logger = logging.getLogger(__name__)
 SENTINEL_VERSION = "20260219f9f6"
 SENTINEL_SDK_URL = f"https://sentinel.openai.com/sentinel/{SENTINEL_VERSION}/sdk.js"
 SENTINEL_REQ_URL = "https://sentinel.openai.com/backend-api/sentinel/req"
+DEFAULT_BEHAVIOR_DURATION_MS = 3400
+DEFAULT_BEHAVIOR_JITTER_MS = 250
+
+_sysrand = random.SystemRandom()
 
 
 def _resolve_node_binary() -> str:
     return (os.getenv("OPENAI_SENTINEL_NODE_PATH", "") or "").strip() or "node"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int((os.getenv(name, "") or "").strip())
+    except ValueError:
+        return default
+
+
+def _behavior_duration_ms(challenge: Optional[dict[str, Any]] = None) -> int:
+    """Jitter the behavior floor so runs do not share one exact duration."""
+    if challenge is not None:
+        so = challenge.get("so") if isinstance(challenge, dict) else None
+        if not (isinstance(so, dict) and so.get("required") is True):
+            return 0
+    base_ms = max(0, _env_int("OPENAI_SENTINEL_BEHAVIOR_MS", DEFAULT_BEHAVIOR_DURATION_MS))
+    jitter_ms = max(
+        0,
+        min(base_ms, _env_int("OPENAI_SENTINEL_BEHAVIOR_JITTER_MS", DEFAULT_BEHAVIOR_JITTER_MS)),
+    )
+    if base_ms == 0 or jitter_ms == 0:
+        return base_ms
+    return int(_sysrand.uniform(base_ms - jitter_ms, base_ms + jitter_ms))
 
 
 def _quickjs_script_path() -> Path:
@@ -251,8 +280,11 @@ def get_sentinel_token_via_quickjs(
         env_payload["device_memory"] = int(device_memory)
 
     try:
+        started = time.monotonic()
         sdk_file = _ensure_sdk_file(session, timeout_ms)
+        sdk_ms = int((time.monotonic() - started) * 1000)
 
+        phase_started = time.monotonic()
         requirements = _run_quickjs_action(
             action="requirements",
             sdk_file=sdk_file,
@@ -260,26 +292,31 @@ def get_sentinel_token_via_quickjs(
             payload=env_payload,
             timeout_ms=timeout_ms,
         )
+        requirements_ms = int((time.monotonic() - phase_started) * 1000)
         request_p = str(requirements.get("request_p") or "").strip()
         if not request_p:
             log("Sentinel QuickJS 失败: requirements 未返回 request_p")
             return None
 
+        phase_started = time.monotonic()
         challenge = _fetch_sentinel_challenge(
             session, device_id=did, flow=flow, request_p=request_p, timeout_ms=timeout_ms,
         )
+        challenge_ms = int((time.monotonic() - phase_started) * 1000)
         c_value = str(challenge.get("token") or "").strip()
         if not c_value:
             log("Sentinel QuickJS 失败: challenge token 为空")
             return None
 
+        behavior_ms = _behavior_duration_ms(challenge)
         solve_payload = dict(env_payload)
         solve_payload.update({
             "request_p": request_p,
             "challenge": challenge,
             "flow": flow,
-            "behavior_duration_ms": 4200,
+            "behavior_duration_ms": behavior_ms,
         })
+        phase_started = time.monotonic()
         solved = _run_quickjs_action(
             action="solve",
             sdk_file=sdk_file,
@@ -287,6 +324,7 @@ def get_sentinel_token_via_quickjs(
             payload=solve_payload,
             timeout_ms=timeout_ms,
         )
+        solve_ms = int((time.monotonic() - phase_started) * 1000)
 
         so_token_raw = str(solved.get("so_token") or "").strip()
 
@@ -312,8 +350,13 @@ def get_sentinel_token_via_quickjs(
             # 服务端确实要了 SO token 但我们没算出来 —— 这才是真异常，保持中止
             log("Sentinel QuickJS 失败: 服务端要求 SO token 但求解为空，中止以避免封号")
             return None
-        log(f"Sentinel QuickJS OK (len={len(sdk_token)}, "
-            f"so={'Y' if so_token_raw else 'N/A(服务端未要求)'})")
+        log(
+            f"Sentinel QuickJS OK (len={len(sdk_token)}, "
+            f"so={'Y' if so_token_raw else 'N/A(服务端未要求)'}, "
+            f"sdk={sdk_ms}ms, requirements={requirements_ms}ms, "
+            f"challenge={challenge_ms}ms, solve={solve_ms}ms, "
+            f"behavior={behavior_ms}ms)"
+        )
         return (sdk_token, so_token_raw)
     except Exception as e:
         # ⚠️ 这里曾经是个纯 catch-all：任何异常都降级成一行 INFO 日志 + return None，

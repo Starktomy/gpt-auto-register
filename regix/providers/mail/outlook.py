@@ -1,10 +1,10 @@
 """Outlook 邮箱 provider（Graph API + IMAP 双通道）。
 
 从 4 段接码格式（email----password----client_id----refresh_token）出发，
-按优先级尝试多种取件方式：
+并行竞速多种取件方式：
   1. Graph API（HTTP REST，扫 inbox / junkemail / deleteditems）
   2. IMAP XOAUTH2（双服务器轮询 outlook.live.com → outlook.office365.com）
-  3. IMAP 密码登录（兜底）
+   （IMAP 密码登录仍作为 IMAP 通道内部兜底）
 
 能力：pooled=True（号池 claim / 用完 mark_dead）
       ephemeral=False（地址固定，OpenAI 可能当老号处理）
@@ -18,13 +18,16 @@ import email.utils as _eu
 import imaplib
 import json
 import logging
+import queue
+import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from .base import ConfigField, MailProvider, register, validate_email
 
@@ -45,6 +48,7 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 GRAPH_FOLDERS = ["inbox", "junkemail", "deleteditems"]
 
 IMAP_SERVERS = ["outlook.live.com", "outlook.office365.com"]
+POLL_INTERVAL_RANGE = (3.0, 4.5)
 
 _FROM_DOMAINS = ("openai.com", "auth.openai", "tm.openai", "chatgpt.com", "tm.open")
 
@@ -55,6 +59,10 @@ IMAP_HOST = IMAP_SERVERS[-1]
 
 class FatalOutlookMailError(RuntimeError):
     """Non-retryable Outlook mail error."""
+
+
+class _MailRaceStopped(RuntimeError):
+    """Internal signal used after another mail channel wins the race."""
 
 
 _FATAL_IMAP_ERROR_PATTERNS = (
@@ -73,6 +81,19 @@ def _is_fatal_imap_error(exc: Exception) -> bool:
 
 
 # ──────────────────────── Microsoft OAuth ────────────────────────
+
+
+def _check_mail_race_stopped(stop_event: Optional[threading.Event]) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise _MailRaceStopped("another mail channel won")
+
+
+def _mail_poll_sleep(stop_event: Optional[threading.Event]) -> None:
+    """Sleep in short slices with jitter so a losing channel can exit quickly."""
+    deadline = time.monotonic() + random.uniform(*POLL_INTERVAL_RANGE)
+    while time.monotonic() < deadline:
+        _check_mail_race_stopped(stop_event)
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
 def _request_access_token(refresh_token: str, client_id: str, scope: str) -> dict:
@@ -157,6 +178,7 @@ def fetch_otp_via_graph(
     threshold_ts: float = 0,
     deadline: float = 0,
     target_email: str = "",
+    stop_event: Optional[threading.Event] = None,
 ) -> str:
     """Graph API 轮询取 OTP。成功返回 6 位 OTP，认证失败抛 FatalOutlookMailError。"""
     if not deadline:
@@ -171,8 +193,10 @@ def fetch_otp_via_graph(
 
     seen: set = set()
 
+    _check_mail_race_stopped(stop_event)
     while time.time() < deadline:
         for folder in GRAPH_FOLDERS:
+            _check_mail_race_stopped(stop_event)
             try:
                 messages = _graph_list_messages(
                     access_token,
@@ -260,7 +284,7 @@ def fetch_otp_via_graph(
                     return otp
 
         token_refreshed = False
-        time.sleep(4)
+        _mail_poll_sleep(stop_event)
 
     raise TimeoutError(f"outlook Graph OTP timeout for {email_addr}")
 
@@ -294,6 +318,7 @@ def fetch_otp_via_imap(
     threshold_ts: float = 0,
     deadline: float = 0,
     target_email: str = "",
+    stop_event: Optional[threading.Event] = None,
 ) -> str:
     """IMAP 轮询取 OTP（XOAUTH2 优先 + 密码兜底，双服务器轮询）。"""
     if not deadline:
@@ -313,6 +338,7 @@ def fetch_otp_via_imap(
     if not use_xoauth2 and not use_password:
         raise FatalOutlookMailError("无可用 IMAP 凭据")
 
+    _check_mail_race_stopped(stop_event)
     while time.time() < deadline:
         M = None
         try:
@@ -486,6 +512,8 @@ def fetch_otp_via_imap(
                 pass
         except FatalOutlookMailError:
             raise
+        except _MailRaceStopped:
+            raise
         except Exception as e:
             if _is_fatal_imap_error(e):
                 raise FatalOutlookMailError(
@@ -497,11 +525,65 @@ def fetch_otp_via_imap(
                     M.logout()
                 except Exception:
                     pass
-        time.sleep(4)
+        _mail_poll_sleep(stop_event)
     raise TimeoutError(f"outlook IMAP OTP timeout for {email_addr}")
 
 
 # ──────────────────────── MailProvider 适配 ────────────────────────
+
+
+def _race_otp_channels(tasks: dict[str, Callable[[], str]]) -> str:
+    """Run mail channels concurrently and return the first OTP found."""
+    if not tasks:
+        raise FatalOutlookMailError("没有可用的邮箱取件通道")
+
+    results: queue.Queue[tuple[str, str, object]] = queue.Queue()
+    stop_event = threading.Event()
+
+    def run_channel(name: str, func: Callable[[], str]) -> None:
+        try:
+            value = func()
+            results.put(("result", name, value))
+        except Exception as exc:
+            results.put(("error", name, exc))
+
+    for channel, func in tasks.items():
+        threading.Thread(
+            target=run_channel,
+            args=(channel, func),
+            name=f"outlook-otp-{channel}",
+            daemon=True,
+        ).start()
+
+    errors: dict[str, Exception] = {}
+    while True:
+        kind, channel, payload = results.get()
+        if kind == "result":
+            stop_event.set()
+            return str(payload)
+
+        errors[channel] = (
+            payload if isinstance(payload, Exception) else RuntimeError(str(payload))
+        )
+        if len(errors) == len(tasks):
+            primary = errors.get("imap") or errors.get("graph")
+            logger.warning(
+                "[mail] 双通道均失败: %s",
+                "; ".join(
+                    f"{name}={type(exc).__name__}: {exc}"
+                    for name, exc in errors.items()
+                ),
+            )
+            raise primary
+
+        remaining = [name for name in tasks if name not in errors]
+        logger.warning(
+            "[mail] %s 通道失败 (%s: %s)，继续等待 %s",
+            channel,
+            type(errors[channel]).__name__,
+            errors[channel],
+            "/".join(remaining),
+        )
 
 
 @register
@@ -601,28 +683,36 @@ class OutlookMailProvider(MailProvider):
 
         has_oauth = bool(self.client_id and self.refresh_token)
         has_password = bool(self.password)
-        graph_error: Exception | None = None
+        stop_event = threading.Event()
 
         if has_oauth:
-            try:
-                logger.info(
-                    f"[mail] Graph API 取 OTP -> {email_addr} "
-                    f"(timeout={method_timeout}s, IMAP兜底=Y)"
-                )
-                return fetch_otp_via_graph(
+            logger.info(
+                f"[mail] Graph + IMAP 双通道竞速 -> {email_addr} "
+                f"(timeout={method_timeout}s)"
+            )
+            deadline = time.time() + method_timeout
+            return _race_otp_channels({
+                "graph": lambda: fetch_otp_via_graph(
                     self.email,
                     self.refresh_token,
                     self.client_id,
-                    deadline=time.time() + method_timeout,
+                    deadline=deadline,
                     threshold_ts=strict_threshold,
                     target_email=email_addr,
-                )
-            except Exception as e:
-                graph_error = e
-                logger.warning(
-                    f"[mail] Graph 失败 ({type(e).__name__}: {e})，"
-                    f"切换 IMAP (timeout={method_timeout}s)"
-                )
+                    stop_event=stop_event,
+                ),
+                "imap": lambda: fetch_otp_via_imap(
+                    self.email,
+                    self.refresh_token,
+                    self.client_id,
+                    password=self.password if has_password else "",
+                    timeout=method_timeout,
+                    deadline=deadline,
+                    threshold_ts=strict_threshold,
+                    target_email=email_addr,
+                    stop_event=stop_event,
+                ),
+            })
 
         logger.info(
             f"[mail] IMAP 取 OTP -> {email_addr} "
@@ -630,21 +720,14 @@ class OutlookMailProvider(MailProvider):
             f"xoauth2={'Y' if has_oauth else 'N'} "
             f"password={'Y' if has_password else 'N'})"
         )
-        try:
-            return fetch_otp_via_imap(
-                self.email,
-                self.refresh_token,
-                self.client_id,
-                password=self.password if has_password else "",
-                timeout=method_timeout,
-                threshold_ts=strict_threshold,
-                target_email=email_addr,
-            )
-        except Exception as e:
-            if graph_error is not None:
-                logger.warning(
-                    f"[mail] IMAP 也失败 ({type(e).__name__}: {e})；"
-                    f"Graph 先前错误: {type(graph_error).__name__}: {graph_error}"
-                )
-            raise
+        return fetch_otp_via_imap(
+            self.email,
+            self.refresh_token,
+            self.client_id,
+            password=self.password if has_password else "",
+            timeout=method_timeout,
+            threshold_ts=strict_threshold,
+            target_email=email_addr,
+            stop_event=stop_event,
+        )
 

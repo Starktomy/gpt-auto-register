@@ -40,6 +40,8 @@ from regix.openai.auth_flow import AuthFlow
 
 logger = logging.getLogger("two_factor")
 
+MFA_INFO_RETRY_DELAYS = (0.0, 0.4, 1.0)
+
 
 # ── RFC 6238 手写实现（无 pyotp 也能算码，双保险）─────────────────
 def hotp(secret_b32: str, counter: int, digits: int = 6) -> str:
@@ -123,15 +125,19 @@ def _enroll_and_activate(flow: AuthFlow, at: str) -> dict | None:
         )
         return None
 
-    # 验证（失败不影响返回：enroll+activate 都 200 即视为成功，secret 已到手）
-    time.sleep(2)
-    hh = flow._common_headers("https://chatgpt.com/backend-api/accounts/mfa_info")
-    hh["Authorization"] = f"Bearer {at}"
-    r5 = flow.session.get(
-        "https://chatgpt.com/backend-api/accounts/mfa_info", headers=hh, timeout=30
-    )
-    if r5.status_code == 200 and (r5.json() or {}).get("mfa_enabled"):
-        logger.info("[2fa] ✅ 绑定成功，mfa_enabled=true")
+    # Activation returning 200 is authoritative. MFA info may propagate a moment
+    # later, so query immediately and retry briefly instead of paying a fixed 2s.
+    for delay in MFA_INFO_RETRY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        hh = flow._common_headers("https://chatgpt.com/backend-api/accounts/mfa_info")
+        hh["Authorization"] = f"Bearer {at}"
+        r5 = flow.session.get(
+            "https://chatgpt.com/backend-api/accounts/mfa_info", headers=hh, timeout=30
+        )
+        if r5.status_code == 200 and (r5.json() or {}).get("mfa_enabled"):
+            logger.info("[2fa] ✅ 绑定成功，mfa_enabled=true")
+            break
     else:
         logger.warning(
             "[2fa] enroll/activate 已 200，但 mfa_info 复核异常: %s %s",

@@ -7,6 +7,10 @@ const cryptoMod = require('node:crypto');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const sdkRaw = fs.readFileSync(process.env.OPENAI_SENTINEL_SDK_FILE, 'utf8');
 
+function emit(value) {
+  process.stdout.write(JSON.stringify(value), () => process.exit(0));
+}
+
 const EXPOSE_PATCH = "return o?r?.[n(63)]?ce({so:o,c:r[n(63)]},t):o:null},t.token=ye,t}({});";
 const EXPOSE_REPLACEMENT =
   "return o?r?.[n(63)]?ce({so:o,c:r[n(63)]},t):o:null},t.token=ye,t.__debug_n=_n,t.__debug_bindProof=D,t}({});";
@@ -559,17 +563,16 @@ async function dispatchBehavior(durationMs) {
         new Promise((_, rej) => setTimeout(() => rej(new Error('init timeout')), 8000)),
       ]);
       if (capturedProof) {
-        process.stdout.write(JSON.stringify({ request_p: capturedProof }));
-        return;
+        return emit({ request_p: capturedProof });
       }
     } catch (_) {}
     const requestP = await context.__debugP.getRequirementsToken();
-    process.stdout.write(JSON.stringify({ request_p: requestP }));
-    return;
+    return emit({ request_p: requestP });
   }
 
   if (action === 'solve') {
-    const behaviorMs = Number(input.behavior_duration_ms || 4200);
+    const rawBehaviorMs = Number(input.behavior_duration_ms);
+    const behaviorMs = Number.isFinite(rawBehaviorMs) ? Math.max(0, rawBehaviorMs) : 4200;
 
     try {
       const mainToken = await Promise.race([
@@ -577,7 +580,7 @@ async function dispatchBehavior(durationMs) {
         new Promise((_, rej) => setTimeout(() => rej(new Error('SDK token timeout')), 8000)),
       ]);
       if (mainToken) {
-        await dispatchBehavior(behaviorMs);
+        if (behaviorMs > 0) await dispatchBehavior(behaviorMs);
         let soToken = '';
         try {
           soToken = await Promise.race([
@@ -587,8 +590,7 @@ async function dispatchBehavior(durationMs) {
         } catch (_) {
           soToken = '';
         }
-        process.stdout.write(JSON.stringify({ token: mainToken, so_token: soToken || '' }));
-        return;
+        return emit({ token: mainToken, so_token: soToken || '' });
       }
     } catch (_) {}
 
@@ -599,12 +601,10 @@ async function dispatchBehavior(durationMs) {
     context.SentinelSDK.__debug_bindProof(challenge, requestP);
     const dx = challenge && challenge.turnstile ? challenge.turnstile.dx : null;
     const tValue = dx ? await context.SentinelSDK.__debug_n(challenge, dx) : null;
-    process.stdout.write(JSON.stringify({ final_p: finalP, t: tValue, so_token: '' }));
-    return;
+    return emit({ final_p: finalP, t: tValue, so_token: '' });
   }
 
   throw new Error('unsupported action: ' + action);
 })().catch(err => {
-  process.stderr.write(String((err && err.stack) || err));
-  process.exit(1);
+  process.stderr.write(String((err && err.stack) || err), () => process.exit(1));
 });
