@@ -38,8 +38,9 @@ logging.basicConfig(
 )
 
 
-def main():
-    if len(sys.argv) < 2:
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) < 1:
         print(
             "Usage: regix "
             "'email----password----client_id----refresh_token'",
@@ -47,7 +48,7 @@ def main():
         )
         sys.exit(2)
 
-    parts = sys.argv[1].split("----")
+    parts = argv[0].split("----")
     if len(parts) != 4:
         print(f"4 段格式错: 拿到 {len(parts)} 段", file=sys.stderr)
         sys.exit(2)

@@ -13,7 +13,8 @@ dependencies = [
 ]
 
 [project.scripts]
-regix = "regix.cli.register_outlook:main"
+regix = "regix.cli.main:main"
+regix-legacy = "regix.cli.register_outlook:main"
 regix-webui = "regix.api.cli:main"
 
 [build-system]

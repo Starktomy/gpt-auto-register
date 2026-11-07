@@ -15,6 +15,7 @@
 | **全自动循环** | 多 worker 并发（1-20），每 worker 独立代理，失败自动换号/换代理，网络错误熔断 |
 | **错误分类** | `network` / `cf_blocked` / `mail_limited` 等分类，区分「换代理」与「停用代理」「换邮箱」的处置策略 |
 | **凭证完整落库** | 保存 `access_token` / `refresh_token` / **原始 session JSON**，多账号批量导出 |
+| **套餐与 Plus 资格** | 注册成功后自动查询套餐、订阅状态和 Plus 试用活动；账号列表可筛选可领 Plus |
 | **配置全部后端化** | 表单偏好、主题、代理池、Remail 订单全在 SQLite，换机器、清缓存后依然保留 |
 | **Docker 部署** | 多阶段构建，最终镜像约 330MB，数据目录外置，容器重建不丢数据 |
 
@@ -111,7 +112,7 @@ regix-webui
 | 注册 | **代理池** | `/proxy` | 代理管理、类型标记、配额、IPv6 检测 |
 | 数据 | 邮箱列表 | `/pool` | 号池状态管理 |
 | 数据 | **Remail 服务** | `/mails` | Remail 订单管理 |
-| 数据 | 注册结果 | `/registered` | 凭证复制与批量导出 |
+| 数据 | 注册结果 | `/registered` | 凭证、套餐/Plus 资格、批量复检与导出 |
 | 数据 | 运行记录 | `/runs` | 历史运行日志 |
 | 配置 | 邮箱配置 | `/settings/mail` | 邮箱来源切换与 provider 配置 |
 | 配置 | 接码配置 | `/settings/sms` | SMS 接码平台配置 |
@@ -224,7 +225,23 @@ regix
 
 **409 `invalid_state` 自动重试**：最多 3 次尝试，命中 409 时重建 session、换出口 IP 并**复用原邮箱**（邮箱已付费，不额外花钱）。被 CF 403 拦截归类为 `cf_blocked`，只换代理，不触发整批熔断。
 
-## 命令行模式（单号注册）
+## 命令行模式
+
+统一 CLI 复用 WebUI 的号池、设置、代理池、注册 worker、TOTP 绑定和落库逻辑：
+
+```bash
+regix register --totp          # 自动领取下一个可用邮箱，注册后绑定 TOTP
+regix register --pool-proxy    # 从代理池选一个代理并计入配额
+regix status                   # 查看号池、代理、偏好和运行中任务
+regix accounts --status available
+regix runs --limit 10
+regix registered --limit 10
+regix api get /api/settings/prefs   # Basic 认证读取 WEBUI_ADMIN_USERNAME / PASSWORD
+```
+
+CLI 默认掩码密码、TOTP secret 和 token；需要本地调试完整凭证时加 `--show-secrets`。
+
+### 旧版单号直跑
 
 ```bash
 regix 'email----password----client_id----refresh_token'
@@ -276,13 +293,19 @@ WebUI「📱 接码配置」Tab 启用后，命中 add-phone 会自动租号 + �
 |---|---|---|
 | **SmsBower** | smsbower.page | V2 API + auto-resend |
 | **HeroSMS** | hero-sms.com | 180+ 国家，SMS-Activate 继任平台 |
+| **API668** | api668.com | 订单式号码 Token，国家/平台/前缀/库存/验证码轮询 |
+
+API668 配置中 `Service` 填平台名称（推荐 `OpenAI`）或数字 `platform_id`。
+API 令牌写入 `Authorization`，客户端会先尝试原始值，遇到 401 自动兼容
+`Bearer` 格式。API668 没有余额接口，WebUI 的“测试”会改为验证国家目录连通性；
+取码时会轮询订单 Token，并读取 `token_url` 中的验证码。
 
 配置步骤：注册平台账号 → 充值 → 拿 API Key → WebUI「📱 接码配置」填 API Key + 选国家 → 保存 → 点「测试余额」确认连通。
 
 | 配置项 | 说明 |
 |---|---|
 | `sms_enabled` | 总开关；关闭时回退到 `OPENAI_PHONE_NUMBER` 环境变量路径 |
-| `sms_provider` | herosms / smsbower / sms_activate |
+| `sms_provider` | herosms / smsbower / api668 |
 | `sms_country` | 国家代码或 ID，默认 `52`（Thailand） |
 | `sms_service` | OpenAI = `dr` |
 | `sms_max_price` | 单号最高价格 |
@@ -309,6 +332,8 @@ WebUI「📱 接码配置」Tab 启用后，命中 add-phone 会自动租号 + �
 | `OAUTH_CODEX_RT_EXCHANGE` | `1` | `1`=尝试 Codex OAuth 拿 refresh_token |
 | `OAUTH_REFRESH_ONLY` | `0` | `1`=只要 refresh_token，跳过 session 步骤 |
 | `OPENAI_SENTINEL_NODE_PATH` | `node` | node 二进制路径 |
+| `OPENAI_SENTINEL_BEHAVIOR_MS` | `3400` | Sentinel solve 行为采集基础时长，单位 ms；服务端未要求 SO token 时自动跳过，测试传 `0` 可关闭 |
+| `OPENAI_SENTINEL_BEHAVIOR_JITTER_MS` | `250` | 行为采集时长上下随机浮动幅度，单位 ms；`0` 表示禁用抖动 |
 | `LOGIN_PASSWORD` | - | 已有账号 login_password 分支用的密码（不设则取 email 去 @） |
 | `AUTH_HTTP_TRACE` | `0` | `1`=打印每次 HTTP 请求 method/url/status/cookies（调试用） |
 | `AUTH_TRACE_DUMP` | `0` | `1`=写完整 HTTP request/response 到 `outputs/auth_trace_*.jsonl` |
@@ -327,7 +352,7 @@ WebUI「📱 接码配置」Tab 启用后，命中 add-phone 会自动租号 + �
 |---|---|
 | `regix/openai/` | 纯协议核心：HTTP client、OAuth、注册、登录、验证码、2FA/手机验证、session/token、Sentinel |
 | `regix/providers/mail/` | Remail / Outlook / Cloudflare / iCloud 邮箱 provider |
-| `regix/providers/sms/` | SmsBower 兼容接码协议、国家映射、工厂与两阶段回调 |
+| `regix/providers/sms/` | SmsBower / HeroSMS / API668、国家映射、工厂与两阶段回调 |
 | `regix/storage/` | SQLite 仓储：号池、registered、代理池、Remail 订单、runs、设置 |
 | `regix/services/` | 注册 worker、自动循环、导出、2FA 服务 |
 | `regix/api/` | FastAPI app factory 与按领域拆分的 routers |
@@ -344,6 +369,11 @@ WebUI「📱 接码配置」Tab 启用后，命中 add-phone 会自动租号 + �
   但 OpenAI 服务端做 OTP 派发前会跑**真 sdk.js** 校验 token，纯 Python PoW 会被判为非浏览器 → 邮件 silent-drop。
 - **QuickJS sentinel（默认启用）**：跑 OpenAI 真 `sdk.js`（自动下载缓存到 `/tmp/openai-sentinel-demo/<ver>/sdk.js`），返回真实浏览器同款 token，OTP 派发正常。
 - 没装 node 也能跑，但只能用于纯协议探测，**不能真发码**。
+
+### 注册性能与随机节奏
+
+真实注册耗时、Sentinel 分段基准、Graph/IMAP 双通道竞速和后续优化约束见
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md)。不要为了本地跑分关闭 SO 行为采集、代理检查或 warmup。
 
 ### Outlook 收件细节
 
