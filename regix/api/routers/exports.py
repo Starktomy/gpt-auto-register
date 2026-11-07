@@ -186,6 +186,75 @@ def api_update_credentials(req: UpdateCredReq):
     return {"ok": True, "email": email, "changed": changed}
 
 
+class UpdateProxyReq(BaseModel):
+    email: str = Field(..., description="已注册账号邮箱")
+    proxy: str = Field("", description="新代理；空串=改为直连")
+
+
+class Bind2FAReq(BaseModel):
+    email: str = Field(..., description="已注册账号邮箱")
+    proxy: str = Field("", description="代理；留空则用该号当前的代理")
+    otp_timeout: int = Field(180, description="等待邮件验证码的秒数")
+
+
+@router.post("/api/registered/update_proxy")
+def api_update_proxy(req: UpdateProxyReq):
+    """Set (or clear) the proxy of one registered account.
+
+    The stored value is what later checks and payment-link requests fall back
+    to, so an account keeps leaving from the same IP it was registered on.
+    Pool quota is moved with it: the old proxy is released, the new one is
+    reserved when it exists in the pool.
+    """
+    email = (req.email or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "email 不能为空")
+    ok = db.update_registered_proxy(email, req.proxy)
+    if not ok:
+        raise HTTPException(404, f"未找到已注册账号: {email}")
+    logger.info(f"[registered] 修改代理 email={email} -> {'直连' if not req.proxy.strip() else '已设置'}")
+    return {"ok": True, "email": email, "proxy": (req.proxy or "").strip()}
+
+
+@router.post("/api/registered/bind_2fa")
+def api_bind_2fa(req: Bind2FAReq):
+    """Bind TOTP 2FA to an account that does not have one yet.
+
+    Runs the existing slow login chain (``bind_totp_2fa``) and stores the new
+    secret immediately. Accounts that already have a secret are refused: the
+    secret cannot be fetched again, and replacing a live factor needs the old
+    code plus a disable step.
+    """
+    from ...services.two_factor import add_totp_2fa
+
+    email = (req.email or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "email 不能为空")
+    row = db.get_registered(email)
+    if not row:
+        raise HTTPException(404, f"未找到已注册账号: {email}")
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    effective_proxy = (req.proxy or "").strip() or str(extra.get("proxy") or "").strip()
+
+    info = add_totp_2fa(email, proxy=effective_proxy, otp_timeout=int(req.otp_timeout or 180))
+    if not info.get("ok"):
+        reason = str(info.get("reason") or "unknown")
+        messages = {
+            "already_bound": "该号已有 2FA secret；当前页面先支持添加，不覆盖已有 secret",
+            "password_missing": "该号没有密码，无法程序化补绑 2FA",
+            "mail_credentials_missing": "号池里找不到这个号的邮箱凭证，收不到验证码",
+            "bind_failed": "补绑失败：登录/接码/激活有一条没通过，详见运行日志",
+            "not_found": "未找到该账号",
+        }
+        raise HTTPException(400, messages.get(reason, f"补绑失败: {reason}"))
+    return {
+        "ok": True,
+        "email": email,
+        "totp_secret": info.get("totp_secret", ""),
+        "factor_id": info.get("factor_id", ""),
+    }
+
+
 # ──────────────────────── 套餐 / Plus 试用资格检查 ────────────────────────
 
 

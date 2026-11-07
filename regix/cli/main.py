@@ -313,6 +313,28 @@ def cmd_codex_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bind_2fa(args: argparse.Namespace) -> int:
+    """Bind TOTP 2FA to a registered account that does not have one."""
+    from regix.services.two_factor import add_totp_2fa
+
+    info = add_totp_2fa(args.email, proxy=args.proxy, otp_timeout=args.otp_timeout)
+    _print_json(info, show_secrets=args.show_secrets)
+    return 0 if info.get("ok") else 1
+
+
+def cmd_set_proxy(args: argparse.Namespace) -> int:
+    """Set (or clear) the proxy stored for one registered account."""
+    ok = db.update_registered_proxy(args.email, args.proxy or "")
+    if not ok:
+        print(f"not found: {args.email}", file=sys.stderr)
+        return 1
+    _print_json(
+        {"ok": True, "email": args.email.strip().lower(), "proxy": (args.proxy or "").strip()},
+        show_secrets=args.show_secrets,
+    )
+    return 0
+
+
 def cmd_payment_link(args: argparse.Namespace) -> int:
     """Generate a Plus/Team checkout link for a registered account."""
     from regix.services.payment import PaymentLinkError, generate_payment_link_for_account
@@ -462,6 +484,19 @@ def build_parser() -> argparse.ArgumentParser:
     codex_login.add_argument("--otp-timeout", type=int, default=180)
     _add_common_output(codex_login)
     codex_login.set_defaults(func=cmd_codex_login)
+
+    bind_2fa = sub.add_parser("bind-2fa", help="给已注册账号补绑 TOTP 2FA（已有 secret 不覆盖）")
+    bind_2fa.add_argument("email", help="已注册账号的邮箱")
+    bind_2fa.add_argument("--proxy", default="", help="代理；留空则用该号当前的代理")
+    bind_2fa.add_argument("--otp-timeout", type=int, default=180)
+    _add_common_output(bind_2fa)
+    bind_2fa.set_defaults(func=cmd_bind_2fa)
+
+    set_proxy = sub.add_parser("set-proxy", help="设置某个已注册账号的代理（留空=直连）")
+    set_proxy.add_argument("email", help="已注册账号的邮箱")
+    set_proxy.add_argument("proxy", nargs="?", default="", help="代理 URL；留空则清除")
+    _add_common_output(set_proxy)
+    set_proxy.set_defaults(func=cmd_set_proxy)
 
     payment_link = sub.add_parser("payment-link", help="为已注册账号生成 Plus/Team 支付链接")
     payment_link.add_argument("email", help="已注册账号的邮箱")

@@ -77,6 +77,7 @@ from .registered import (
     save_registered,
     save_totp_early,
     update_plus_check,
+    update_registered_proxy,
     update_registered_manual,
 )
 from .runs import (
@@ -185,6 +186,7 @@ __all__ = [
     "stats",
     "stats_by_kind",
     "update_plus_check",
+    "update_registered_proxy",
     "update_proxy",
     "update_registered_manual",
     "update_remail_order_status",

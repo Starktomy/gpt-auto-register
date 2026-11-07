@@ -243,6 +243,67 @@ def update_registered_manual(email: str, password: Optional[str] = None,
         return True
 
 
+def update_registered_proxy(email: str, proxy: str) -> bool:
+    """Set (or clear) the per-account proxy stored in ``extra_json.proxy``.
+
+    Quota accounting follows the same rule as registration: a proxy from the
+    pool is counted while an account points at it, and the old proxy is
+    released when the account moves away. Proxies that are not in the pool are
+    still accepted (manual entry) and simply carry no quota.
+
+    Passing an empty string switches the account back to a direct connection.
+    Returns ``False`` when the email is unknown.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return False
+    new_proxy = (proxy or "").strip()
+
+    with _lock:
+        con = _conn()
+        row = con.execute(
+            "SELECT extra_json FROM registered WHERE email=?", (email,)
+        ).fetchone()
+        if not row:
+            return False
+        extra: dict = {}
+        if row["extra_json"]:
+            try:
+                extra = json.loads(row["extra_json"]) or {}
+            except Exception:
+                extra = {}
+        old_proxy = str(extra.get("proxy") or "").strip()
+        if old_proxy == new_proxy:
+            return True
+
+        if old_proxy:
+            # 旧代理不再被这个号占用：还一格配额（不会减到负数）
+            con.execute(
+                "UPDATE proxy_pool SET used_count=MAX(0, used_count-1) WHERE proxy=?",
+                (old_proxy,),
+            )
+        if new_proxy:
+            # 新代理若在池里就预占一格；不在池里 = 手填代理，无配额概念
+            con.execute(
+                "UPDATE proxy_pool SET used_count=used_count+1, last_used_at=? "
+                "WHERE proxy=? AND enabled=1 AND (max_uses=0 OR used_count < max_uses)",
+                (time.time(), new_proxy),
+            )
+            extra["proxy"] = new_proxy
+            # 新占用生效后，之前的“已释放”标记作废
+            extra.pop("proxy_released", None)
+        else:
+            extra.pop("proxy", None)
+            extra.pop("proxy_released", None)
+
+        con.execute(
+            "UPDATE registered SET extra_json=? WHERE email=?",
+            (json.dumps(extra, ensure_ascii=False) if extra else None, email),
+        )
+        con.commit()
+        return True
+
+
 def update_plus_check(email: str, plus_info: dict) -> None:
     """把 Plus 检查结果写入 extra_json.plus_check。"""
     email = email.lower()
@@ -414,6 +475,9 @@ def get_registered(email: str) -> Optional[dict]:
             out["extra"] = json.loads(out["extra_json"])
         except Exception:
             out["extra"] = {}
+    else:
+        # 始终给调用方一个 dict，省得每处都写 row.get("extra") or {}
+        out["extra"] = {}
     out.pop("extra_json", None)
     return out
 

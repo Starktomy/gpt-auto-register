@@ -125,6 +125,9 @@ regix-webui
 和支付区域 → 生成三条链接（`pay.openai.com` 长链、`checkout.stripe.com` 镜像、
 `chatgpt.com/checkout` 内部链接）。详见下方「生成支付链接」。
 
+同一页还可以给**每个号单独设置代理**（点「代理」列）：后续「检查 Plus」和
+「生成支付链接」都会沿用它；没有 2FA 的号会在操作列出现 **绑定2FA** 按钮。
+
 ## 邮箱来源
 
 WebUI「⚙️ 设置 → 邮箱配置」里下拉切换，后端 provider 声明配置项，前端动态渲染。
@@ -227,6 +230,19 @@ WebUI 里点「生成支付链接」失败时会直接给出「重登换 Codex t
 
 ## 导出格式
 
+## 一键补绑 2FA
+
+「注册结果」页里没有 2FA 的账号会在操作列出现 **绑定2FA** 按钮；CLI 是
+`regix bind-2fa <email>`。
+
+`mfa/enroll` 只认「最近认证过」的会话，普通 access token 会返回
+`401 recent_auth_required`。所以这条链会先跑一次 Codex OAuth（同时把
+`refresh_token` 轮换并落库），再用刚换出来的 token enroll → 激活。
+
+新 secret 是**先落库再激活**：激活成功后服务端只存哈希，取不回来，任何一步崩溃
+都不能把它弄丢。已经有 secret 的号会被直接拒绝——覆盖掉唯一一份 secret 等于把号锁死。
+（「更换 2FA」需要先拿到旧码再 disable，这一版先只做添加。）
+
 「导出配置」菜单可选择格式，批量导出多账号。
 
 | 格式 | 文件名 | 说明 |
@@ -283,6 +299,8 @@ regix accounts --status available
 regix runs --limit 10
 regix registered --limit 10
 regix codex-login <email>           # 没有 RT 的老号：重登 + Codex OAuth 补一个
+regix bind-2fa <email>              # 给没有 2FA 的号一键补绑 TOTP（已有 secret 不覆盖）
+regix set-proxy <email> [代理URL]   # 设置单个号的代理（留空=直连）
 regix payment-link <email>          # 生成 Plus/Team 支付链接
 regix payment-link <email> --plan team --seats 5 --interval year
 regix payment-profiles              # 列出支付区域预设（国家/币种）

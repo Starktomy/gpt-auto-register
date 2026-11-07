@@ -130,6 +130,21 @@ the poll interval back to a fixed value.
 
 ### 2.8 TOTP secrets are single-delivery
 
+Binding TOTP to an **existing** account (the WebUI "绑定2FA" button, `regix
+bind-2fa`, `POST /api/registered/bind_2fa`) has three rules:
+
+- `POST /backend-api/accounts/mfa/enroll` answers `401 recent_auth_required`
+  for an ordinary API token. Only a **fresh Codex OAuth authorization**
+  counts as recent auth, so `add_totp_2fa()` reuses
+  `codex_login.login_and_exchange()` and enrolls with the access token that
+  exchange returned. Do not try to enroll with the stored web token.
+- That exchange **rotates the refresh token**. It must be written back
+  immediately; keeping the old one leaves the account unable to mint Codex
+  tokens (`refresh_token_reused`).
+- Persist the new secret **before** calling
+  `activate_enrollment`. Activation is irreversible and the server keeps only
+  a hash, so a crash between the two steps must not lose the secret.
+
 `regix/services/two_factor.py` enrolls, activates, and receives the secret
 exactly once from the server; it cannot be fetched again. The registrar writes
 it with `db.save_totp_early()` immediately after activation, before the phone
@@ -450,6 +465,12 @@ Storage rules:
   result whitelist in `regix/services/registration.py` used to drop it (the
   accounts registered before 2026-11-07 have an empty `device_id`); keep it in
   the whitelist and keep the `save_registered` column mapping.
+- `registered.extra.proxy` is the per-account exit IP. It can be edited from
+  the WebUI (`POST /api/registered/update_proxy`) and
+  `db.update_registered_proxy()` moves pool quota with it: the old proxy is
+  released, the new one is reserved when it is in the pool. Do not write
+  `extra_json` from a caller without going through that function, or the
+  quota accounting will drift.
 
 ---
 
@@ -506,6 +527,8 @@ regix accounts --status available
 regix runs --limit 10
 regix registered --limit 10
 regix codex-login <email>              # one-time Codex OAuth for accounts without a RT
+regix bind-2fa <email>                 # add TOTP to an account that has none (secret is kept)
+regix set-proxy <email> [proxy-url]    # per-account proxy (empty clears it)
 regix payment-link <email>             # Plus/Team checkout links
 regix payment-link <email> --promo-campaign plus-1-month-free
 regix payment-link <email> --plan team --seats 5 --interval year

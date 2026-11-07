@@ -6,6 +6,7 @@ import {
   listRegistered, getRegistered, deleteRegistered,
   bulkDeleteRegistered, bulkDeleteAccounts, checkPlus,
   listExportFormats, exportRegistered, updateCredentials, markAbnormal,
+  updateRegisteredProxy, bindTotp,
 } from '@/api/register'
 import { copyText, fmtTime } from '@/api/request'
 import { useFormStore, proxyText } from '@/stores/form'
@@ -395,6 +396,51 @@ async function saveEdit() {
 }
 
 // ── 生成支付链接（独立按钮，不混进检测/导出流程）──
+// ── 每个号自己的代理 ──
+// 这个值不是只给表格看的：后续 Plus 检测、支付链接都会沿用它，
+// 让账号一直从注册时的那个 IP 出去。
+const proxyVisible = ref(false)
+const proxyEmail = ref('')
+const proxyValue = ref('')
+const proxySaving = ref(false)
+
+function openProxyDialog(row) {
+  proxyEmail.value = row.email
+  proxyValue.value = row.proxy || ''
+  proxyVisible.value = true
+}
+
+async function saveProxy() {
+  proxySaving.value = true
+  try {
+    await updateRegisteredProxy({ email: proxyEmail.value, proxy: proxyValue.value })
+    ElMessage.success(proxyValue.value ? '代理已更新' : '已改为直连')
+    proxyVisible.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    proxySaving.value = false
+  }
+}
+
+// ── 一键补绑 2FA（只对还没有 secret 的号显示按钮）──
+const binding2fa = ref('')
+
+async function bind2fa(row) {
+  if (!(await confirm(`给 ${row.email} 绑定 TOTP 2FA？\n（会重走一次登录，可能收到邮件验证码，约 1~2 分钟）`))) return
+  binding2fa.value = row.email
+  try {
+    const r = await bindTotp({ email: row.email })
+    ElMessage.success(`已绑定 2FA${r.factor_id ? '：' + r.factor_id : ''}`)
+    await load()
+  } catch (e) {
+    ElMessage.error('绑定失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    binding2fa.value = ''
+  }
+}
+
 // 一次只能给一个号生成：checkout session 是**按账号**建的，
 // 批量生成会让页面上的链接和账号对不上号。
 const payVisible = ref(false)
@@ -556,8 +602,10 @@ onActivated(() => {
         </el-table-column>
         <el-table-column label="代理" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">
-            <span v-if="row.proxy" class="mono" style="font-size: 12px">{{ row.proxy }}</span>
-            <span v-else class="hint">—</span>
+            <el-button
+              size="small" text type="primary" class="mono" style="font-size: 12px"
+              @click="openProxyDialog(row)"
+            >{{ row.proxy || '直连' }}</el-button>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90">
@@ -569,10 +617,16 @@ onActivated(() => {
         <el-table-column label="时间" width="160">
           <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="290" fixed="right">
+        <el-table-column label="操作" width="370" fixed="right">
           <template #default="{ row }">
             <el-button size="small" text @click="viewCred(row.email)">查看凭证</el-button>
             <el-button size="small" text type="warning" @click="openEdit(row)">编辑</el-button>
+            <el-button
+              v-if="!row.totp_secret"
+              size="small" text type="success"
+              :loading="binding2fa === row.email"
+              @click="bind2fa(row)"
+            >绑定2FA</el-button>
             <el-button
               size="small" text :type="row.abnormal ? 'info' : 'warning'"
               @click="toggleAbnormal(row)"
@@ -674,6 +728,31 @@ onActivated(() => {
         <template #footer>
           <el-button @click="editVisible = false">取消</el-button>
           <el-button type="primary" :loading="editSaving" @click="saveEdit">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 单个号的代理：改完后续检测/支付都走这个出口 -->
+      <el-dialog v-model="proxyVisible" title="设置代理" width="560px" top="12vh">
+        <el-form label-width="80px">
+          <el-form-item label="账号">
+            <span class="mono" style="font-size: 13px">{{ proxyEmail }}</span>
+          </el-form-item>
+          <el-form-item label="代理">
+            <el-select
+              v-model="proxyValue" filterable clearable allow-create default-first-option
+              :reserve-keyword="false" placeholder="从代理池选择或直接输入，留空=直连"
+              style="width: 100%"
+            >
+              <el-option v-for="p in proxyList" :key="p" :label="p" :value="p" />
+            </el-select>
+            <div class="hint" style="margin-top: 6px">
+              后续「检查 Plus」和「生成支付链接」在未显式指定代理时会用这个 IP。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="proxyVisible = false">取消</el-button>
+          <el-button type="primary" :loading="proxySaving" @click="saveProxy">保存</el-button>
         </template>
       </el-dialog>
 

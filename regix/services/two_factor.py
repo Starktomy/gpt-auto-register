@@ -359,3 +359,140 @@ def bind_totp_2fa(
     except Exception as e:  # noqa: BLE001 — 绑定任何异常都不能拖垮已注册成功的号
         logger.warning("[2fa] 绑定过程异常（账号仍有效，仅未绑 2FA）: %s", e)
         return None
+
+
+# ── 给【已注册的老号】补绑 2FA（一键添加）──────────────────────────
+def add_totp_2fa(
+    email: str,
+    *,
+    proxy: str = "",
+    otp_timeout: int = 180,
+) -> dict:
+    """Bind TOTP to an existing account that does not have a secret yet.
+
+    The enroll endpoint answers ``401 recent_auth_required`` for an ordinary
+    API token. A **fresh Codex OAuth authorization** counts as recent auth, so
+    this reuses the exact login+exchange chain from
+    :mod:`regix.services.codex_login` and enrolls with the resulting access
+    token. That chain also rotates the refresh token; it is written back
+    immediately because the old one stops working after the exchange.
+
+    The new secret is persisted **before** activation: activation is the point
+    of no return (the server keeps only the hash), so a crash between the two
+    must not lose it.
+
+    Refuses accounts that already have a secret: replacing a live factor needs
+    the current TOTP code, and overwriting the only stored secret would lock
+    the account out.
+    """
+    from regix.storage import facade as db
+    from regix.services.codex_login import CodexLoginError, login_and_exchange
+
+    normalized = str(email or "").strip().lower()
+    row = db.get_registered(normalized)
+    if not row:
+        return {"ok": False, "reason": "not_found", "email": normalized}
+    if str(row.get("totp_secret") or "").strip():
+        logger.info("[2fa] %s 已有 secret，添加流程不再覆盖", normalized)
+        return {"ok": False, "reason": "already_bound", "email": normalized}
+    if not str(row.get("password") or "").strip():
+        return {"ok": False, "reason": "password_missing", "email": normalized}
+
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    effective_proxy = str(proxy or "").strip() or str(extra.get("proxy") or "").strip()
+
+    try:
+        flow, result, _row = login_and_exchange(
+            normalized, proxy=effective_proxy, otp_timeout=otp_timeout, save=True
+        )
+    except CodexLoginError as exc:
+        logger.warning("[2fa] %s 重登失败: %s", normalized, exc)
+        return {"ok": False, "reason": "login_failed", "email": normalized}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[2fa] %s 重登异常: %s", normalized, exc)
+        return {"ok": False, "reason": "login_failed", "email": normalized}
+
+    at = str(result.get("access_token") or "").strip()
+    if not at:
+        return {"ok": False, "reason": "login_failed", "email": normalized}
+
+    base = "https://chatgpt.com/backend-api/accounts"
+
+    def _headers(path: str) -> dict:
+        headers = flow._common_headers(f"https://chatgpt.com{path}")
+        headers["Authorization"] = f"Bearer {at}"
+        headers["Content-Type"] = "application/json"
+        return headers
+
+    logger.info("[2fa] %s 检查当前绑定状态...", normalized)
+    info_resp = flow.session.get(
+        f"{base}/mfa_info", headers=_headers("/backend-api/accounts/mfa_info"), timeout=30
+    )
+    if info_resp.status_code == 200:
+        info = info_resp.json() or {}
+        if info.get("mfa_enabled"):
+            return {"ok": False, "reason": "already_bound", "email": normalized}
+
+    logger.info("[2fa] %s enroll TOTP（secret 只出现一次）...", normalized)
+    enroll = flow.session.post(
+        f"{base}/mfa/enroll",
+        headers=_headers("/backend-api/accounts/mfa/enroll"),
+        json={"factor_type": "totp"},
+        timeout=30,
+    )
+    if enroll.status_code != 200:
+        logger.warning("[2fa] enroll %s: %s", enroll.status_code, (enroll.text or "")[:200])
+        return {"ok": False, "reason": "enroll_failed", "email": normalized}
+    payload = enroll.json() or {}
+    secret = str(payload.get("secret") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    factor_id = str((payload.get("factor") or {}).get("id") or "").strip()
+    if not secret or not session_id:
+        logger.warning("[2fa] enroll 响应缺 secret/session_id: %s", json.dumps(payload)[:200])
+        return {"ok": False, "reason": "enroll_failed", "email": normalized}
+
+    # ★先生效后落库的顺序不能反：激活成功后 secret 就再也取不回来了。
+    db.save_totp_early(normalized, secret, factor_id)
+    logger.info("[2fa] %s secret 已先落库，开始激活", normalized)
+
+    code = totp_now(secret)
+    activate = flow.session.post(
+        f"{base}/mfa/user/activate_enrollment",
+        headers=_headers("/backend-api/accounts/mfa/user/activate_enrollment"),
+        json={"code": code, "factor_type": "totp", "session_id": session_id},
+        timeout=30,
+    )
+    if activate.status_code != 200:
+        logger.warning(
+            "[2fa] activate %s: %s", activate.status_code, (activate.text or "")[:200]
+        )
+        return {
+            "ok": False,
+            "reason": "activate_failed",
+            "email": normalized,
+            "totp_secret": secret,
+            "factor_id": factor_id,
+        }
+
+    for delay in MFA_INFO_RETRY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        verify = flow.session.get(
+            f"{base}/mfa_info", headers=_headers("/backend-api/accounts/mfa_info"), timeout=30
+        )
+        if verify.status_code == 200 and (verify.json() or {}).get("mfa_enabled"):
+            logger.info("[2fa] %s ✅ 补绑成功，secret 已落库", normalized)
+            return {
+                "ok": True,
+                "email": normalized,
+                "totp_secret": secret,
+                "factor_id": factor_id,
+            }
+    logger.warning("[2fa] %s 激活已 200，但 mfa_info 复核未显示启用", normalized)
+    return {
+        "ok": True,
+        "email": normalized,
+        "totp_secret": secret,
+        "factor_id": factor_id,
+        "warning": "mfa_info_not_updated",
+    }

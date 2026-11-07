@@ -199,7 +199,17 @@ class SessionMixin:
                     except Exception:
                         pass
                     break
-            return bool(self.session.cookies.get("__Secure-next-auth.session-token", ""))
+            token = self.session.cookies.get("__Secure-next-auth.session-token", "")
+            if not token:
+                # 排障用：只打 host/path 和状态码，不打 query（里面有 code）
+                final = urlparse(current)
+                logger.warning(
+                    "消费 callback 未拿到 session-token: final=%s%s cookies=%s",
+                    final.netloc,
+                    final.path,
+                    sorted({c.split("=")[0] for c in str(self.session.cookies).split(";") if "=" in c})[:8],
+                )
+            return bool(token)
         except Exception as e:
             logger.warning(f"消费 callback 失败: {e}")
             return False

@@ -28,6 +28,14 @@ export const bulkDeleteRegistered = (payload) =>
 export const markAbnormal = (payload) =>
   http.post('/api/registered/mark_abnormal', payload) // { emails, abnormal }
 
+// 每个号自己的代理：后续检测 / 支付链接都会沿用它（空串 = 直连）
+export const updateRegisteredProxy = (payload) =>
+  http.post('/api/registered/update_proxy', payload)
+
+// 给没有 2FA 的号一键补绑 TOTP（会重走登录，可能触发邮件验证码）
+export const bindTotp = (payload) =>
+  http.post('/api/registered/bind_2fa', payload, { timeout: 300000 })
+
 // 导出后清理用：把号池那一行也删掉。
 // 从 accounts.js 转出来一份，省得 Registered.vue 同时 import 两个 api 模块。
 export { bulkDeleteAccounts } from './accounts'

@@ -37,7 +37,7 @@ class CodexLoginError(RuntimeError):
     """Re-login failed; the account row was left untouched."""
 
 
-def _build_mail_provider(email: str):
+def build_mail_provider(email: str):
     row = db.get_account(email)
     if not row:
         raise CodexLoginError(f"号池里没有 {email}，取不到验证码用的邮箱凭证")
@@ -75,17 +75,21 @@ def _build_sms_callback() -> Optional[PhoneCallbackController]:
         return None
 
 
-def mint_codex_refresh_token(
+def login_and_exchange(
     email: str,
     *,
     proxy: str = "",
     otp_timeout: int = 180,
     save: bool = True,
-) -> dict:
-    """Log an existing account back in and mint a Codex refresh token.
+) -> tuple[AuthFlow, dict, dict]:
+    """Log an existing account back in and run the Codex OAuth exchange.
 
-    Returns a dict with ``ok``, ``has_refresh_token`` and the token lengths.
-    Raises :class:`CodexLoginError` when the login or the exchange fails.
+    Returns ``(flow, result, row)``. The caller gets the live ``AuthFlow`` so
+    it can keep using the fresh session (the 2FA binding needs it): the
+    enroll endpoint requires a recently-authenticated session, and only an
+    authorization-code exchange produces one.
+
+    With ``save=True`` the rotated tokens are written back to the database.
     """
     normalized = str(email or "").strip().lower()
     row = db.get_registered(normalized)
@@ -95,7 +99,7 @@ def mint_codex_refresh_token(
     if not password:
         raise CodexLoginError(f"{normalized} 没有密码，无法程序化重登")
 
-    mail = _build_mail_provider(normalized)
+    mail = build_mail_provider(normalized)
 
     cfg = Config()
     cfg.proxy = str(proxy or "").strip() or None
@@ -151,10 +155,28 @@ def mint_codex_refresh_token(
         )
         logger.info("[codex-login] %s 已写入新的 refresh_token", normalized)
 
+    return flow, result, row
+
+
+def mint_codex_refresh_token(
+    email: str,
+    *,
+    proxy: str = "",
+    otp_timeout: int = 180,
+    save: bool = True,
+) -> dict:
+    """Log an existing account back in and mint a Codex refresh token.
+
+    Returns a dict with ``ok``, ``has_refresh_token`` and the token lengths.
+    Raises :class:`CodexLoginError` when the login or the exchange fails.
+    """
+    flow, result, _row = login_and_exchange(
+        email, proxy=proxy, otp_timeout=otp_timeout, save=save
+    )
     return {
         "ok": True,
-        "email": normalized,
+        "email": str(result.get("email") or email or "").strip().lower(),
         "has_refresh_token": True,
-        "refresh_token_len": len(refresh_token),
+        "refresh_token_len": len(str(result.get("refresh_token") or "")),
         "access_token_len": len(str(result.get("access_token") or "")),
     }
