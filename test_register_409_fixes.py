@@ -29,8 +29,6 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 _ROOT = Path(__file__).resolve().parent
 
 OK = 0
@@ -59,7 +57,7 @@ def section(title: str):
 section("1. 指纹 impersonate 值必须真实存在于 curl_cffi")
 # ---------------------------------------------------------------------------
 
-fp_src = read("fingerprint.py")
+fp_src = read("regix/fingerprint/generator.py")
 impersonates = sorted(set(re.findall(r'"impersonate":\s*"([^"]+)"', fp_src)))
 
 try:
@@ -103,7 +101,20 @@ if supported is not None:
 section("2. 409 重试必须刷新 device_id（不能只重建 session）")
 # ---------------------------------------------------------------------------
 
-af_src = read("auth_flow.py")
+af_src = "\n".join(
+    read(f"regix/openai/{name}")
+    for name in (
+        "auth_flow.py",
+        "models.py",
+        "client.py",
+        "oauth.py",
+        "challenges.py",
+        "token.py",
+        "protocol.py",
+        "session.py",
+        "registration.py",
+    )
+)
 
 # 找到 409 重试块（从 "signup 撞 invalid_state" 往后 2500 字符）
 m = re.search(r"signup 撞 invalid_state", af_src)
@@ -201,11 +212,12 @@ if m3:
             body.find("self.warmup()") < i_order,
         )
 
-    # 第 2 步必须传 email（login_hint 要用）
+    # login_hint 会把授权状态提前推进到 email-verification，
+    # 后续 authorize_continue 提交同一个邮箱就会 invalid_state。
     seg = body[i_authurl: i_authurl + 200]
     check(
-        "get_auth_url 仍然传了 email（login_hint 依赖它）",
-        "email=email" in seg,
+        "get_auth_url 不预填 email（避免状态提前推进）",
+        "email=email" not in seg,
         seg[:80],
     )
 
@@ -214,7 +226,18 @@ if m3:
 section("4. 语法完整性")
 # ---------------------------------------------------------------------------
 
-for rel in ("auth_flow.py", "fingerprint.py"):
+for rel in (
+    "regix/openai/auth_flow.py",
+    "regix/openai/models.py",
+    "regix/openai/client.py",
+    "regix/openai/oauth.py",
+    "regix/openai/challenges.py",
+    "regix/openai/token.py",
+    "regix/openai/protocol.py",
+    "regix/openai/session.py",
+    "regix/openai/registration.py",
+    "regix/fingerprint/generator.py",
+):
     try:
         ast.parse(read(rel))
         check(f"{rel} 语法正确", True)

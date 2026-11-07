@@ -12,7 +12,7 @@
    已有订单（长效订单复用的功能）。如果不隔离：
      - 测试的假订单会写进生产库，污染真实的订单列表
      - 生产库里遗留的订单会被测试当成"可复用"而返回，断言就乱套了
-   所以在 import webui.db **之前**把 WEBUI_DB_PATH 指到临时文件。
+   在 import regix.storage.facade 之前把 WEBUI_DB_PATH 指到临时文件。
 
 用法：.venv/Scripts/python.exe test_remail_provider.py
 """
@@ -28,18 +28,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-# ⚠️ 必须在 import webui.db 之前设好 —— db.py 在 import 时读这个环境变量
-#    决定 DB_PATH，事后改没用。
-_TEST_DB = Path(tempfile.gettempdir()) / "gpt_register_remail_test.db"
+# Set the isolated DB before importing regix.storage.facade.
+_TEST_DB = Path(tempfile.gettempdir()) / "regix_remail_test.db"
 for _suffix in ("", "-shm", "-wal"):
     try:
         os.remove(str(_TEST_DB) + _suffix)
     except OSError:
         pass
 os.environ["WEBUI_DB_PATH"] = str(_TEST_DB)
-os.environ["WEBUI_LOG_DIR"] = str(Path(tempfile.gettempdir()) / "gpt_register_remail_test_logs")
+os.environ["WEBUI_LOG_DIR"] = str(Path(tempfile.gettempdir()) / "regix_remail_test_logs")
 
 STATE = {
     "orders": [],          # 已下单记录
@@ -145,8 +142,8 @@ def main():
     base = f"http://127.0.0.1:{port}"
     print(f"[fake remail] 监听 {base}\n")
 
-    from mail_providers.remail import RemailMailProvider
-    from webui import db
+    from regix.providers.mail.remail import RemailMailProvider
+    from regix.storage import facade as db
 
     # 清掉临时库里的残留订单 —— 复用机制会优先挑"没关联账号的长效订单"，
     # 不清的话第 2 次下单拿到的不是新邮箱（而是上一轮留下的），

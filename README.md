@@ -1,4 +1,4 @@
-<h1 align="center">gpt-outlook-register</h1>
+<h1 align="center">Regix</h1>
 
 <p align="center">纯协议 ChatGPT 账号注册机：<code>curl_cffi</code> 模拟 TLS 指纹 + QuickJS 解 OpenAI Sentinel PoW + 邮箱取 OTP，直接走 OpenAI authorize 状态机，无浏览器、无 Playwright、无 Camoufox。</p>
 
@@ -24,7 +24,7 @@
 
 ```bash
 git clone https://github.com/Regert888/gpt-outlook-register.git
-cd gpt-outlook-register
+cd gpt-auto-register
 docker compose up -d --build
 ```
 
@@ -38,7 +38,7 @@ docker compose up -d --build
 更新到新版本：
 
 ```bash
-cd gpt-outlook-register
+cd gpt-auto-register
 git pull
 docker compose up -d --build
 ```
@@ -49,16 +49,16 @@ docker compose up -d --build
 
 ```bash
 git clone https://github.com/Regert888/gpt-outlook-register.git
-cd gpt-outlook-register
-pip install -r requirements.txt
-python start_webui.py
+cd gpt-auto-register
+uv sync
+regix-webui
 # 浏览器自动打开 http://127.0.0.1:8765/
 ```
 
 公网启动：
 
 ```bash
-python start_webui.py --host 0.0.0.0 --port 8765
+regix-webui --host 0.0.0.0 --port 8765
 ```
 
 **Linux 服务器后台运行**（推荐 `screen`，关 SSH 不杀进程）：
@@ -66,7 +66,7 @@ python start_webui.py --host 0.0.0.0 --port 8765
 ```bash
 apt install -y screen        # CentOS/RHEL: yum install -y screen
 screen -S webui
-python start_webui.py --host 0.0.0.0 --port 8765
+regix-webui --host 0.0.0.0 --port 8765
 # 按 Ctrl+A 再按 D 离开，进程继续运行
 # 重新进入：screen -r webui
 ```
@@ -94,7 +94,7 @@ cp data/webui.db data/webui.db.backup
 git pull
 
 # 3. 重启
-python start_webui.py
+regix-webui
 ```
 
 数据库在 `data/` 下（Docker 部署）或 `webui/webui.db`（源码运行），已在 `.gitignore` 中，
@@ -202,7 +202,7 @@ WebUI「⚙️ 设置 → 邮箱配置」里下拉切换，后端 provider 声�
 ## 完整协议链路
 
 ```
-register_outlook.py
+regix
     └── AuthFlow(cfg).run_register(mail_provider)
             ├── [1/10] GET  chatgpt.com/api/auth/csrf                       → csrf_token
             ├── [2/10] POST chatgpt.com/api/auth/signin/openai              → auth_url (含 client_id)
@@ -227,7 +227,7 @@ register_outlook.py
 ## 命令行模式（单号注册）
 
 ```bash
-python register_outlook.py 'email----password----client_id----refresh_token'
+regix 'email----password----client_id----refresh_token'
 ```
 
 Outlook 4 段接码格式：
@@ -264,8 +264,7 @@ charles@outlook.jp----<pwd>----9e5f94bc-e8a4-...----M.C538_BAY.0.U.-Cs...
 ### 单独测试取码
 
 ```bash
-python mail_outlook.py 'email----password----client_id----refresh_token'
-# → OTP: 123456  （需要 OpenAI 已发过码进该邮箱）
+Use the mail provider API or WebUI mail diagnostics to inspect OTP delivery.
 ```
 
 ## SMS 接码集成
@@ -322,43 +321,20 @@ WebUI「📱 接码配置」Tab 启用后，命中 add-phone 会自动租号 + �
 
 ## 文件清单
 
-### 核心库（命令行 + WebUI 共用）
+### 包结构
 
-| 文件 | 作用 |
+| 路径 | 作用 |
 |---|---|
-| `register_outlook.py` | **命令行入口**：4 段格式 → `AuthFlow.run_register` → 写出账号 JSON |
-| `auth_flow.py` | **纯协议核心**：csrf → authorize → sentinel → signup → otp → create_account → callback → token exchange |
-| `http_client.py` | `curl_cffi` Chrome136 TLS 指纹包装（失败自动降级 chrome124 / chrome120） |
-| `config.py` | 极简 Config（只留 `proxy` 字段） |
-| `sentinel.py` | OpenAI Sentinel Token 纯 Python PoW（FNV-1a 32-bit） |
-| `sentinel_quickjs.py` | Sentinel Token QuickJS 路径（跑 OpenAI sdk.js，需要 node） |
-| `openai_sentinel_quickjs.js` | QuickJS 路径用的 sdk.js wrapper |
-| `sms_provider.py` | **SMS 接码 provider**：BaseSmsProvider + SmsActivate / HeroSMS / SmsBower + PhoneCallbackController |
-
-### 邮箱 Provider（`mail_providers/`）
-
-| 文件 | 作用 |
-|---|---|
-| `base.py` | Provider 基类：配置声明、错误分类、`wait_for_otp(earliest=...)` 统一取件接口 |
-| `remail.py` | **Remail 商业邮箱 API**：下单 / 取件 / 自检 / 长效订单复用 / 短效单次取码 |
-| `outlook.py` | Outlook IMAP XOAUTH2 取 OTP（refresh_token 续期 + 多 folder + tm1 影子过滤） |
-| `cf_temp.py` | CF Worker 自建邮箱（`cloudflare_temp_email` 兼容；OTP 抽取防误判） |
-| `icloud_relay.py` | iCloud 隐藏邮箱中继 |
-
-> 根目录的 `mail_outlook.py` / `mail_cf.py` 是**兼容转发壳**（实现已迁到 `mail_providers/`），
-> 仅保留旧 import 路径可用，新代码请用 `create_mail_provider(kind, ...)`。
-
-### WebUI
-
-| 文件 | 作用 |
-|---|---|
-| `start_webui.py` | 一键启动脚本（自动装依赖 + 打开浏览器） |
-| `webui/app.py` | FastAPI 主程序（路由 + SSE 流式日志） |
-| `webui/db.py` | SQLite：号池 / 注册结果 / **代理池** / **Remail 订单** / 偏好设置 |
-| `webui/registrar.py` | 注册任务 worker（独立线程 + 日志回调 + 错误分类 + 订单关联） |
-| `webui/auto_loop.py` | 全自动循环（多 worker、动态挑代理、CF 分类、熔断） |
-| `webui/export_formats.py` | 多格式批量导出定义 |
+| `regix/openai/` | 纯协议核心：HTTP client、OAuth、注册、登录、验证码、2FA/手机验证、session/token、Sentinel |
+| `regix/providers/mail/` | Remail / Outlook / Cloudflare / iCloud 邮箱 provider |
+| `regix/providers/sms/` | SmsBower 兼容接码协议、国家映射、工厂与两阶段回调 |
+| `regix/storage/` | SQLite 仓储：号池、registered、代理池、Remail 订单、runs、设置 |
+| `regix/services/` | 注册 worker、自动循环、导出、2FA 服务 |
+| `regix/api/` | FastAPI app factory 与按领域拆分的 routers |
+| `regix/cli/` | `regix` 命令行入口 |
 | `webui/frontend/` | Vue 3 + Element Plus 前端源码 |
+
+所有实现都位于 `regix/` 包内；根目录不再保留 Python 兼容壳。
 
 ## 技术细节
 

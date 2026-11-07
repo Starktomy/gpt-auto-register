@@ -4,8 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: gpt-outlook-register:local
-    container_name: gpt-outlook-register
+    image: regix:local
+    container_name: regix
     restart: unless-stopped
     ports:
       - "8765:8765"

@@ -39,6 +39,17 @@ def read(rel: str) -> str:
     return (_FRONT / rel).read_text(encoding="utf-8")
 
 
+def read_flow_source() -> str:
+    """Read every OpenAI protocol module after the AuthFlow mixin split."""
+    root = Path(__file__).resolve().parent / "regix" / "openai"
+    names = (
+        "auth_flow.py", "models.py", "client.py", "oauth.py",
+        "challenges.py", "token.py", "protocol.py", "session.py",
+        "registration.py",
+    )
+    return "\n".join((root / name).read_text(encoding="utf-8") for name in names)
+
+
 def _code_only(src: str) -> str:
     """去掉注释，只留真正的代码 —— 判断"某调用是否存在"时要用。
 
@@ -87,15 +98,15 @@ def test_proxy_pool_persistence():
         check(f"{name} 用了独立的临时 DB",
               "WEBUI_DB_PATH" in text,
               "没设 WEBUI_DB_PATH → 直接操作生产库")
-        check(f"{name} 在 import webui.db 之前设环境变量",
-              text.index("WEBUI_DB_PATH") < text.index("from webui import db")
-              if "from webui import db" in text else True,
+        check(f"{name} 在 import regix.storage 前设环境变量",
+              text.index("WEBUI_DB_PATH") < text.index("from regix.storage")
+              if "regix.storage" in text else True,
               "设得太晚，db.py 已经在 import 时读过了")
         check(f"{name} 结束时清理临时 DB",
               "_cleanup_test_db" in text or "os.remove" in text)
 
     # 生产库里不能有测试残留
-    from webui import db
+    from regix.storage import facade as db
     bad = [o["email"] for o in db.list_remail_orders()
            if o["order_no"].startswith(("ORD0", "REUSE", "DIS_"))]
     check("生产库没有测试残留订单", not bad, bad)
@@ -122,7 +133,7 @@ def test_2fa_switch():
           "want_2fa: form.value.autoWant2fa" in auto_src)
 
     # 后端两处判断都在
-    reg_src = Path(__file__).resolve().parent / "webui" / "registrar.py"
+    reg_src = Path(__file__).resolve().parent / "regix" / "services" / "registration.py"
     reg = reg_src.read_text(encoding="utf-8")
     check("registrar 的钩子判断 want_2fa",
           'on_session_ready=_bind_2fa_hook if options.get("want_2fa") else None' in reg)
@@ -158,14 +169,17 @@ def test_refresh_token_switch():
           "want_refresh_token: form.value.autoWantRefreshToken" in auto_src)
 
     # 后端：默认值也应该是 False
-    app_src = Path(__file__).resolve().parent / "webui" / "app.py"
-    app = app_src.read_text(encoding="utf-8")
+    api_root = Path(__file__).resolve().parent / "regix" / "api" / "routers"
+    app = "\n".join(
+        (api_root / name).read_text(encoding="utf-8")
+        for name in ("registration.py", "auto_loop.py")
+    )
     check("后端 RegisterReq/AutoLoopStartReq 默认 want_refresh_token=False",
           app.count("want_refresh_token: bool = False") == 2,
           f"实际匹配 {app.count('want_refresh_token: bool = False')} 处")
 
     # 后端：接码未启用时跳过 Codex
-    reg = (Path(__file__).resolve().parent / "webui" / "registrar.py").read_text(encoding="utf-8")
+    reg = (Path(__file__).resolve().parent / "regix" / "services" / "registration.py").read_text(encoding="utf-8")
     check("registrar 有 _sms_ready 判定函数",
           "def _sms_ready()" in reg)
     check("registrar 在接码不可用时跳过 Codex",
@@ -175,7 +189,7 @@ def test_refresh_token_switch():
           f"实际 {reg.count('env_overrides[\"OAUTH_SECONDARY_AUTHORIZE_EXCHANGE\"] = \"0\"')} 处（两个分支各一处）")
 
     # 后端：auth_flow 的兜底防线
-    flow = (Path(__file__).resolve().parent / "auth_flow.py").read_text(encoding="utf-8")
+    flow = read_flow_source()
     check("auth_flow 的 Codex need_otp 分支有兜底防线",
           "Codex 登录推进需要 OTP，但已禁用 Codex OAuth" in flow,
           "没有兜底 → env 开关失效时仍会发第二封验证码")
@@ -197,11 +211,11 @@ def test_shortmail_mode():
     """
     print("\n【J】短效邮箱（code 模式）适配")
 
-    base = (Path(__file__).resolve().parent / "mail_providers" / "base.py").read_text(encoding="utf-8")
+    base = (Path(__file__).resolve().parent / "regix" / "providers" / "mail" / "base.py").read_text(encoding="utf-8")
     check("base.MailProvider 有 ephemeral_mailbox 属性",
           "ephemeral_mailbox: bool = False" in base)
 
-    remail = (Path(__file__).resolve().parent / "mail_providers" / "remail.py").read_text(encoding="utf-8")
+    remail = (Path(__file__).resolve().parent / "regix" / "providers" / "mail" / "remail.py").read_text(encoding="utf-8")
     check("Remail 按 service_mode 置 ephemeral_mailbox",
           'self.ephemeral_mailbox = (self.service_mode == "code")' in remail)
     check("wait_for_otp 支持 earliest 参数",
@@ -211,7 +225,7 @@ def test_shortmail_mode():
     check("短效模式不再用 issued_after 严格过滤",
           "elif issued_after is not None:" in remail)
 
-    flow = (Path(__file__).resolve().parent / "auth_flow.py").read_text(encoding="utf-8")
+    flow = read_flow_source()
     check("auth_flow 记录注册开始时刻",
           "self._register_started_at = time.time()" in flow)
     check("auth_flow 短效模式跳过设密码",
@@ -221,7 +235,7 @@ def test_shortmail_mode():
     check("取件时传入 earliest",
           "earliest=self._register_started_at" in flow)
 
-    reg = (Path(__file__).resolve().parent / "webui" / "registrar.py").read_text(encoding="utf-8")
+    reg = (Path(__file__).resolve().parent / "regix" / "services" / "registration.py").read_text(encoding="utf-8")
     check("registrar 有 mail_limited 错误类别",
           "_MAIL_LIMITED_PATTERNS" in reg)
     check("mail_limited 在 network 之前判定",
@@ -232,13 +246,13 @@ def test_shortmail_mode():
           'db.mark_failed(email, f"[{category}] {err}")' in reg)
 
     # 实际行为验证
-    from webui.registrar import classify_error
+    from regix.services.registration import classify_error
     check("Remail OTP timeout 归类为 mail_limited（不是 network）",
           classify_error("Remail OTP timeout for x@outlook.com", "remail") == "mail_limited")
     check("真正的网络错误仍归 network",
           classify_error("TLS 瞬断 timeout", "remail") == "network")
 
-    from mail_providers.remail import RemailMailProvider
+    from regix.providers.mail.remail import RemailMailProvider
     p_code = RemailMailProvider(api_base="https://x", api_key="rk-x", project_id=2, service_mode="code")
     p_pur = RemailMailProvider(api_base="https://x", api_key="rk-x", project_id=2, service_mode="purchase")
     check("code 模式 provider 标记为 ephemeral_mailbox",
@@ -250,15 +264,15 @@ def test_shortmail_mode():
 def test_cf_blocked_and_shortmail_state():
     """v13：CF 拦截分类 + 静态/动态代理差异处置 + 短效订单 consumed 状态。"""
     print("\n【K. CF拦截分类 + 代理类型 + 短效订单状态】")
-    from webui import db
-    from webui.registrar import classify_error
+    from regix.storage import facade as db
+    from regix.services.registration import classify_error
 
     # ── 错误分类 ──
     cases = [
         ("创建账户失败: 400 - {\"error\": {\"code\": \"user_already_exists\"}}",
          "account", "user_already_exists 归 account（邮箱废了换下一个）"),
         ("authorize/continue 失败(screen_hint=signup): HTTP 409 ... invalid_state",
-         "account", "invalid_state 归 account（session 失效，不是网络问题）"),
+         "network", "invalid_state 归 network（会话失效可重建后重试）"),
         ("warmup 失败：4 次重试均未拿到 chatgpt.com 的 oai-did cookie，继续注册必然 409 invalid_state",
          "cf_blocked", "warmup CF403 归 cf_blocked（换代理，不熔断）"),
         ("Remail OTP timeout for x@outlook.com",
@@ -339,7 +353,7 @@ def test_cf_blocked_and_shortmail_state():
     check("Remail 页有 consumed 状态映射", "consumed:" in ms)
 
     # ── auto_loop：cf_blocked 不熔断 ──
-    al = (Path(__file__).resolve().parent / "webui" / "auto_loop.py").read_text(encoding="utf-8")
+    al = (Path(__file__).resolve().parent / "regix" / "services" / "auto_loop.py").read_text(encoding="utf-8")
     check("auto_loop 处理 cf_blocked 分类",
           'category == "cf_blocked"' in al)
     check("auto_loop 调 mark_proxy_cf_blocked",
@@ -348,7 +362,7 @@ def test_cf_blocked_and_shortmail_state():
           'if category == "network":\n                    self._consecutive_network_fails += 1' in al)
 
     # ── auth_flow：409 可重试 ──
-    flow = (Path(__file__).resolve().parent / "auth_flow.py").read_text(encoding="utf-8")
+    flow = read_flow_source()
     check("auth_flow 有 invalid_state 重试",
           "invalid_state" in flow and "max_attempts = 3" in flow)
     check("重试时重建 session 换 IP",
@@ -359,8 +373,8 @@ def test_session_json_capture():
     """v14：session 接口的完整响应 JSON 原文落库 + 导出。"""
     print("\n【L. session_json 原始响应保存与导出】")
     import json as _json
-    from webui import db
-    from webui import export_formats
+    from regix.storage import facade as db
+    from regix.services import export_formats
 
     # ── 表结构 ──
     con = db._conn()
@@ -412,12 +426,12 @@ def test_session_json_capture():
     check("CRED_KEYS 含 session_json", "'session_json'" in rv)
 
     # ── auth_flow ──
-    flow = (Path(__file__).resolve().parent / "auth_flow.py").read_text(encoding="utf-8")
+    flow = read_flow_source()
     check("AuthResult 有 session_json 字段", "self.session_json" in flow)
     check("get_auth_session 保存完整 JSON", "self.result.session_json = json.dumps(" in flow)
 
     # ── registrar ──
-    reg = (Path(__file__).resolve().parent / "webui" / "registrar.py").read_text(encoding="utf-8")
+    reg = (Path(__file__).resolve().parent / "regix" / "services" / "registration.py").read_text(encoding="utf-8")
     check("registrar 显式带上 session_json", 'd["session_json"]' in reg)
 
     con = db._conn()

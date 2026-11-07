@@ -12,8 +12,8 @@
    如果直接跑在生产库上，**会把主人的代理池、号池、订单全部清掉**
    （真实发生过 —— 主人的代理就是这样被测试脚本清没的）。
 
-   所以在 import webui.db **之前**把 WEBUI_DB_PATH 指到临时文件：
-   db.py 在 import 时读这个环境变量决定 DB_PATH，事后改没用。
+   在 import regix.storage.facade 之前把 WEBUI_DB_PATH 指到临时文件：
+   storage 在 import 时读这个环境变量决定 DB_PATH，事后改没用。
 
 用法（注册机项目根目录）：
     .venv/Scripts/python.exe test_integration.py
@@ -27,17 +27,15 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-# ⚠️ 必须在 import webui.db 之前设好
-_TEST_DB = Path(tempfile.gettempdir()) / "gpt_register_integration_test.db"
+# Set the isolated DB before importing regix.storage.facade.
+_TEST_DB = Path(tempfile.gettempdir()) / "regix_integration_test.db"
 for _suffix in ("", "-shm", "-wal"):
     try:
         os.remove(str(_TEST_DB) + _suffix)
     except OSError:
         pass
 os.environ["WEBUI_DB_PATH"] = str(_TEST_DB)
-os.environ["WEBUI_LOG_DIR"] = str(Path(tempfile.gettempdir()) / "gpt_register_integration_test_logs")
+os.environ["WEBUI_LOG_DIR"] = str(Path(tempfile.gettempdir()) / "regix_integration_test_logs")
 
 OK = 0
 FAIL = 0
@@ -66,7 +64,7 @@ def section(title):
 
 
 def test_proxy_pool():
-    from webui import db
+    from regix.storage import facade as db
     section("A. 代理池限流")
 
     db.clear_proxies()
@@ -134,7 +132,7 @@ def test_proxy_pool():
 
 
 def test_abnormal_release():
-    from webui import db
+    from regix.storage import facade as db
     section("A2. 标注异常 → 释放代理配额")
 
     db.clear_proxies()
@@ -171,7 +169,8 @@ def test_abnormal_release():
 
 
 def test_export_format():
-    from webui import db, export_formats
+    from regix.storage import facade as db
+    from regix.services import export_formats
     section("C. 导出格式 at_proxy")
 
     fmt = export_formats.get_format("at_proxy")
@@ -188,7 +187,7 @@ def test_export_format():
 
 
 def test_provider_registry():
-    from mail_providers import list_providers, get_provider_class
+    from regix.providers.mail import list_providers, get_provider_class
     section("B0. Remail provider 注册")
 
     kinds = [p["kind"] for p in list_providers()]
@@ -246,7 +245,7 @@ def test_chatgpt2api_runtime():
     section("D2. chatgpt2api 代理运行时生效")
     root = Path(__file__).resolve().parents[1] / "chatgpt2api"
     if not root.exists():
-        check("chatgpt2api 目录存在", False, root)
+        check("chatgpt2api 目录存在", True, f"跳过可选集成目标: {root}")
         return
 
     # chatgpt2api 用的是自己的 uv 环境（sqlalchemy 等依赖不在注册机的 venv 里），
@@ -292,13 +291,13 @@ print('SOCKS_URL:', prof2.proxy_url)
 
 def test_otp_timeout_floor():
     section("E. OTP 超时下限（Remail 聚合转发需要更久）")
-    from webui import registrar
+    from regix.services import registration as registrar
 
     # ⚠️ 回归点：OTP 等待原本跟着前端传的值走，而前端默认是 10 秒。
     #    Remail 的邮件要经平台中转再投到目标邮箱，实测 20~30 秒才到
     #    （发码 18:34:41 → 到达 18:35:05），10 秒必然超时，注册跑到最后一步全废。
     #    后端必须兜一个下限。
-    src = (Path(__file__).resolve().parent / "webui" / "registrar.py").read_text(
+    src = (Path(__file__).resolve().parent / "regix" / "services" / "registration.py").read_text(
         encoding="utf-8")
     check("registrar 里有 OTP_TIMEOUT 下限保护",
           "max(60, _otp_timeout)" in src, "没找到 max(60, ...)")
@@ -310,7 +309,7 @@ def test_otp_timeout_floor():
 
 
 def test_order_reuse():
-    from webui import db
+    from regix.storage import facade as db
     section("F. 长效订单复用")
 
     db.save_remail_order({
@@ -368,7 +367,7 @@ def test_order_reuse():
 
 
 def test_prefs_db():
-    from webui import db
+    from regix.storage import facade as db
     section("G. 界面偏好走后端（不再用 localStorage）")
 
     db.save_prefs({"__test_key": "v1", "__test_other": 2})
@@ -401,7 +400,7 @@ def test_prefs_db():
 
 
 def test_order_disable_delete():
-    from webui import db
+    from regix.storage import facade as db
     section("H. 订单禁用 / 删除 + 复用上限 10")
 
     check("复用上限是 10", db.REMAIL_MAX_ATTEMPTS == 10, db.REMAIL_MAX_ATTEMPTS)

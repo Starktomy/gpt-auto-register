@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# gpt-outlook-register —— WebUI 的容器镜像
+# Regix —— WebUI 的容器镜像
 #
 # 【关于体积：node 到底占多少】
 #   怕"node 镜像占空间"多半是想到了 node:22（**1.1GB**，带完整 npm）。
@@ -30,7 +30,7 @@
 #   浅层校验，OTP 邮件会被**静默丢弃**（表现为注册跑到最后一步收不到码）。
 #   必须真在 JS VM 里跑一遍 OpenAI 的 sdk.js → 需要 `node <script>`。
 #
-# 构建：docker build -t gpt-outlook-register:local .
+# 构建：docker build -t regix:local .
 # 运行：docker compose up -d
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -99,18 +99,8 @@ RUN node -e "console.log('node ok:', process.version)"
 
 WORKDIR /app
 
-# 应用代码
-COPY auth_flow.py config.py fingerprint.py http_client.py main.py ./
-COPY mail_cf.py mail_outlook.py openai_sentinel_quickjs.js ./
-COPY register_outlook.py sentinel.py sentinel_quickjs.py start_webui.py ./
-COPY mail_providers/ ./mail_providers/
-
-# webui 后端代码。
-# ⚠️ 只 COPY 后端真正需要的部分 —— 整个 webui/ 目录里还压着
-#    frontend/ 的源码和 node_modules，白白多几十 MB。
-#    静态资源（static/）在下面从 web-build 阶段单独 COPY 进来
-#    （.dockerignore 里排除了 webui/static/，本地那份不进镜像）。
-COPY webui/*.py ./webui/
+# Application package; the container entry point uses the packaged API directly.
+COPY regix/ ./regix/
 
 # 前端构建产物
 COPY --from=web-build /app/webui/static/ ./webui/static/
@@ -125,4 +115,4 @@ EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/stats', timeout=4).status==200 else 1)"
 
-CMD ["python", "-m", "uvicorn", "webui.app:app", "--host", "0.0.0.0", "--port", "8765", "--access-log"]
+CMD ["python", "-m", "uvicorn", "regix.api.app:app", "--host", "0.0.0.0", "--port", "8765", "--access-log"]
