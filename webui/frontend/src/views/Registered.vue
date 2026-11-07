@@ -501,6 +501,12 @@ onActivated(() => {
             <span v-else class="hint">—</span>
           </template>
         </el-table-column>
+        <el-table-column label="套餐" width="100">
+          <template #default="{ row }">
+            <span v-if="plusOf(row)?.plan_label">{{ plusOf(row).plan_label }}</span>
+            <span v-else class="hint">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="access" width="100" align="center">
           <template #default="{ row }">
             <el-button v-if="row.at_len > 0" size="small" text type="primary" @click="copyCell(row.email, 'access_token')">

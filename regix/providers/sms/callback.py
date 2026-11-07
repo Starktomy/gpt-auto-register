@@ -8,7 +8,16 @@ from typing import Callable, Optional
 from .base import BaseSmsProvider, SmsActivation
 from .countries import SMS_COUNTRY_NAMES_CN
 from .factory import create_sms_provider
-from .smsbower import SMS_DEFAULT_COUNTRY, SmsBowerProvider, _SMS_VERIFY_LOCK
+from .api668 import Api668Provider
+from .smsbower import (
+    OPENAI_SMS_COUNTRIES,
+    SMS_DEFAULT_COUNTRY,
+    SmsBowerProvider,
+    _SMS_VERIFY_LOCK,
+    _safe_bool,
+    _safe_float,
+    _safe_int,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +55,8 @@ class PhoneCallbackController:
         self.provider: Optional[BaseSmsProvider] = None
         self.activation: Optional[SmsActivation] = None
         self.completed = False
+        self._activation_consumed = False
+        self._purchase_locked = False
         self._verify_lock_acquired = False
 
     def _provider(self) -> BaseSmsProvider:
@@ -55,6 +66,12 @@ class PhoneCallbackController:
 
     def get_phone(self) -> str:
         """阶段 1：租手机号（已带 +）。"""
+        if self.activation is not None and not self.completed and not self._activation_consumed:
+            self._activation_consumed = True
+            return self.activation.phone_number
+        if self._purchase_locked:
+            raise RuntimeError("SMS controller is locked to the preloaded activation")
+
         provider = self._provider()
         # 同号复用锁（SmsBower 系列才用，防止两个注册任务并发抢同一个 cache）
         if isinstance(provider, SmsBowerProvider) and not self._verify_lock_acquired:
@@ -65,10 +82,9 @@ class PhoneCallbackController:
         allowed_raw = str(self.config.get("sms_allowed_countries") or "").strip()
         allowed_list = [c.strip() for c in allowed_raw.replace(";", ",").split(",") if c.strip()]
 
-        effective_country = self.country
         country_candidates: list[str] = []
 
-        if self.auto_select_country and isinstance(provider, SmsBowerProvider):
+        if self.auto_select_country and isinstance(provider, (SmsBowerProvider, Api668Provider)):
             if allowed_list:
                 self.log(f"🔍 自动选号: 从主人勾选的 {len(allowed_list)} 个国家依次尝试（按价格升序）")
                 try:
@@ -122,7 +138,8 @@ class PhoneCallbackController:
                 country=country_candidates[0],
                 country_candidates=country_candidates,
             )
-        except Exception as exc:
+            self._activation_consumed = True
+        except Exception:
             self._release_lock()
             raise
 
@@ -132,6 +149,48 @@ class PhoneCallbackController:
         self.log(f"✅ 已租到号码{'(复用)' if reused else ''}: {self.activation.phone_number} "
                  f"国家={used_country_label} (activation_id={self.activation.activation_id})")
         return self.activation.phone_number
+
+    def preload_phone(self) -> str:
+        """Acquire one number now so the next get_phone() reuses it once."""
+        if self.activation is not None and not self.completed:
+            return self.activation.phone_number
+        provider = self._provider()
+        candidates = [
+            item for item in (
+                str(self.config.get("sms_allowed_countries") or "")
+                .replace(";", ",")
+                .split(",")
+            )
+            if item.strip()
+        ]
+        country = str(self.country or "").strip()
+        if country and country not in candidates:
+            candidates.insert(0, country)
+        if not candidates:
+            raise RuntimeError("SMS 接码缺少国家配置")
+        self.activation = provider.get_number(
+            service=self.service,
+            country=candidates[0].strip(),
+            country_candidates=[item.strip() for item in candidates],
+        )
+        self._activation_consumed = False
+        self._purchase_locked = True
+        return self.activation.phone_number
+
+    def adopt_activation(self, activation: SmsActivation) -> str:
+        """Resume an already-purchased activation without creating another order."""
+        if not activation.activation_id or not activation.phone_number:
+            raise ValueError("activation_id and phone_number are required")
+        self._provider()
+        self.activation = activation
+        self.completed = False
+        self._activation_consumed = False
+        self._purchase_locked = True
+        self.log(
+            "♻️ 复用已购号码: "
+            f"{activation.phone_number} (activation_id={activation.activation_id})"
+        )
+        return activation.phone_number
 
     def get_code(self, timeout: int = 180) -> str:
         """阶段 2：等待 SMS 验证码。"""
@@ -193,6 +252,8 @@ class PhoneCallbackController:
                 self.log(f"🗑️ 已释放未使用号码: activation_id={self.activation.activation_id}")
             except Exception:
                 pass
+        self.activation = None
+        self._activation_consumed = True
         self._release_lock()
 
     def _release_lock(self) -> None:

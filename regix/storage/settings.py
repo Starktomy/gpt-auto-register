@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 
 from .database import _conn, _lock
@@ -139,7 +138,7 @@ def get_sms_config() -> dict:
     """返回 SMS 接码配置（api_key 隐藏明文）。
 
     sms_enabled:        '0'/'1' 是否启用接码（命中 add-phone 时才会用）
-    sms_provider:       smsbower
+    sms_provider:       smsbower / herosms / api668
     sms_country:        国家代码或 ID（推荐 '52' = Thailand，OpenAI 走 SMS 的唯一稳定国家）
     sms_service:        服务代码（OpenAI = 'dr'）
     sms_max_price:      号码最高单价（SmsBower / SmsBower 用，单位平台货币；空 / -1 = 不限）
@@ -148,6 +147,9 @@ def get_sms_config() -> dict:
     sms_auto_country:   '0'/'1' 自动选最优国家（按价格 + 库存）
     sms_auto_min_stock: 自动选国家最低库存（默认 20）
     sms_auto_max_price: 自动选国家最高单价（默认 0 = 不限）
+    sms668_prefix:      API668 指定的号码前缀（空 = 平台默认）
+    sms668_base_url:    API668 服务地址（空 = https://api668.com）
+    sms668_auth_scheme: API668 Authorization 格式（raw / bearer）
     """
     return {
         "sms_enabled":             get_setting("sms_enabled", "0"),
@@ -166,13 +168,16 @@ def get_sms_config() -> dict:
         "sms_auto_max_price":      get_setting("sms_auto_max_price", ""),
         "sms_max_phone_attempts":  get_setting("sms_max_phone_attempts", ""),
         "sms_per_phone_timeout":   get_setting("sms_per_phone_timeout", "80"),
+        "sms668_prefix":           get_setting("sms668_prefix", ""),
+        "sms668_base_url":         get_setting("sms668_base_url", ""),
+        "sms668_auth_scheme":      get_setting("sms668_auth_scheme", "raw"),
     }
 
 
 def save_sms_config(data: dict) -> None:
     """保存 SMS 配置。sms_api_key 传 '***' 表示不修改。"""
     # 校验 provider
-    valid_providers = {"smsbower", "herosms"}
+    valid_providers = {"smsbower", "herosms", "api668"}
     if "sms_provider" in data:
         p = str(data["sms_provider"]).strip().lower()
         if p not in valid_providers:
@@ -184,6 +189,7 @@ def save_sms_config(data: dict) -> None:
         "sms_phone_success_max", "sms_auto_min_stock", "sms_auto_max_price",
         "sms_max_phone_attempts", "sms_per_phone_timeout",
         "sms_allowed_countries",
+        "sms668_prefix", "sms668_base_url", "sms668_auth_scheme",
     ):
         if key in data:
             set_setting(key, str(data[key]).strip())
@@ -220,6 +226,9 @@ def get_sms_internal_config() -> dict:
         "sms_auto_max_price":      get_setting("sms_auto_max_price", ""),
         "sms_max_phone_attempts":  get_setting("sms_max_phone_attempts", ""),
         "sms_per_phone_timeout":   get_setting("sms_per_phone_timeout", "80"),
+        "sms668_prefix":           get_setting("sms668_prefix", ""),
+        "sms668_base_url":         get_setting("sms668_base_url", ""),
+        "sms668_auth_scheme":      get_setting("sms668_auth_scheme", "raw"),
     }
 
 

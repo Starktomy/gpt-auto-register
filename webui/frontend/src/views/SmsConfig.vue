@@ -17,6 +17,7 @@ const autoMinStock = ref('20')
 const allowed = ref([]) // 允许国家 id 数组
 const maxPhoneAttempts = ref('')
 const perPhoneTimeout = ref('80')
+const api668Prefix = ref('')
 
 const allCountries = ref([])
 const countriesLoading = ref(false)
@@ -44,6 +45,20 @@ const countryOptions = computed(() =>
   })),
 )
 
+const providerLabel = computed(() => ({
+  smsbower: 'SmsBower',
+  herosms: 'HeroSMS',
+  api668: 'API668',
+}[provider.value] || provider.value))
+
+const serviceLabel = computed(() =>
+  provider.value === 'api668' ? '平台名称或 platform_id' : 'Service 代码（OpenAI = dr）'
+)
+
+const servicePlaceholder = computed(() =>
+  provider.value === 'api668' ? 'OpenAI 或数字 platform_id' : 'dr'
+)
+
 async function loadCountries(p) {
   countriesLoading.value = true
   try {
@@ -65,7 +80,9 @@ async function load() {
     provider.value = config.sms_provider || 'smsbower'
     apiKey.value = ''
     apiKeyPh.value = config.sms_api_key === '***' ? '已设置（留空不修改）' : '粘贴接码平台 API Key'
-    service.value = config.sms_service || 'dr'
+    service.value = provider.value === 'api668'
+      ? (config.sms_service && config.sms_service !== 'dr' ? config.sms_service : 'OpenAI')
+      : (config.sms_service || 'dr')
     maxPrice.value = config.sms_max_price || ''
     fixedPrice.value = config.sms_fixed_price || ''
     phoneSuccessMax.value = config.sms_phone_success_max || '3'
@@ -73,12 +90,15 @@ async function load() {
     allowed.value = (config.sms_allowed_countries || '').split(',').map((s) => s.trim()).filter(Boolean)
     maxPhoneAttempts.value = config.sms_max_phone_attempts || ''
     perPhoneTimeout.value = config.sms_per_phone_timeout || '80'
+    api668Prefix.value = config.sms668_prefix || ''
     await loadCountries(provider.value)
   } catch (e) { ElMessage.error(e.message) }
 }
 
 async function onProviderChange() {
   allowed.value = []
+  if (provider.value === 'api668' && service.value.trim() === 'dr') service.value = 'OpenAI'
+  if (provider.value !== 'api668' && service.value.trim() === 'OpenAI') service.value = 'dr'
   await loadCountries(provider.value)
 }
 
@@ -91,7 +111,9 @@ async function save() {
       sms_enabled: enabled.value ? '1' : '0',
       sms_provider: provider.value,
       sms_api_key: apiKey.value.trim() || '***',
-      sms_service: service.value.trim() || 'dr',
+      sms_service: provider.value === 'api668'
+        ? (service.value.trim() || 'OpenAI')
+        : (service.value.trim() || 'dr'),
       sms_max_price: price,
       sms_auto_max_price: price,
       sms_fixed_price: fixedPrice.value.trim(),
@@ -103,6 +125,7 @@ async function save() {
       sms_auto_min_stock: autoMinStock.value.trim() || '20',
       sms_max_phone_attempts: maxPhoneAttempts.value.trim(),
       sms_per_phone_timeout: perPhoneTimeout.value.trim() || '80',
+      sms668_prefix: api668Prefix.value.trim(),
     })
     ElMessage.success('保存成功')
     // ⚠️ 原来这里有 `setTimeout(load, 300)` —— 保存完又重新读一遍后端。
@@ -144,6 +167,10 @@ onActivated(() => load())
               <span>HeroSMS（取消后 20 分钟自动退款）</span>
               <a :href="'https://hero-sms.com/?ref=738021'" target="_blank" class="sms-reg-link" @click.stop>前往注册 ↗</a>
             </el-radio>
+            <el-radio value="api668">
+              <span>API668（订单式号码 Token）</span>
+              <a href="https://api668.com" target="_blank" class="sms-reg-link" @click.stop>前往平台 ↗</a>
+            </el-radio>
           </el-radio-group>
         </el-form-item>
 
@@ -154,8 +181,8 @@ onActivated(() => load())
             </el-form-item>
           </el-col>
           <el-col :span="8">
-            <el-form-item label="Service 代码（OpenAI = dr）">
-              <el-input v-model="service" placeholder="dr" />
+            <el-form-item :label="serviceLabel">
+              <el-input v-model="service" :placeholder="servicePlaceholder" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -206,6 +233,9 @@ onActivated(() => load())
         <el-form-item>
           <el-checkbox v-model="reusePhone" @change="markTouched('reusePhone')"><b>启用号码复用</b>（gpt风控，号码短时间无法复用）</el-checkbox>
         </el-form-item>
+        <el-form-item v-if="provider === 'api668'" label="号码前缀（留空自动获取）">
+          <el-input v-model="api668Prefix" placeholder="例如 66" />
+        </el-form-item>
 
         <el-divider content-position="left">失败重试策略</el-divider>
         <el-row :gutter="16">
@@ -225,8 +255,8 @@ onActivated(() => load())
     </el-card>
 
     <FooterToolbar>
-      <template #left>接码平台：{{ provider === 'herosms' ? 'HeroSMS' : 'SmsBower' }}{{ allowed.length ? ` · 允许国家 ${allowed.length} 个` : ' · 全平台自动选号' }}</template>
-      <el-button :loading="testing" @click="test">测试余额</el-button>
+      <template #left>接码平台：{{ providerLabel }}{{ allowed.length ? ` · 允许国家 ${allowed.length} 个` : ' · 全平台自动选号' }}</template>
+      <el-button :loading="testing" @click="test">{{ provider === 'api668' ? '测试连接' : '测试余额' }}</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
     </FooterToolbar>
   </div>

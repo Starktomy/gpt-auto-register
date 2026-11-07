@@ -1,25 +1,10 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
+import json
 import logging
 import os
-import random
-import re
-import secrets
-import struct
-import subprocess
-import time
-import uuid
-from datetime import datetime
-from typing import Any, Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
-from regix.providers.mail import MailProvider
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +17,6 @@ class SessionMixin:
         logger.info("[9.5/10] 重新 authorize 获取 session ...")
         try:
             # 去掉 prompt=login 参数，利用已有的 auth session cookie
-            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
             parsed = urlparse(original_auth_url)
             params = parse_qs(parsed.query, keep_blank_values=True)
             params.pop("prompt", None)

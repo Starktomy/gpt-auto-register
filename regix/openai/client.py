@@ -1,25 +1,18 @@
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+import json
 import logging
 import os
 import random
 import re
-import secrets
-import struct
-import subprocess
 import time
-import uuid
 from datetime import datetime
-from typing import Any, Optional
-from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
-from regix.providers.mail import MailProvider
+from regix.fingerprint.generator import fingerprint_for_impersonate, ua_for_impersonate
+from regix.http.client import create_http_session
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +269,7 @@ class ClientMixin:
         except Exception:
             return
 
+    @staticmethod
     def _walk_collect_str_fields(obj: Any, wanted_keys: set[str], out: dict[str, str], depth: int = 0, max_depth: int = 6):
         """递归收集目标字段（仅字符串值）。"""
         if depth > max_depth or obj is None:
@@ -285,10 +279,14 @@ class ClientMixin:
                 kk = (str(k) or "").strip().lower()
                 if kk in wanted_keys and isinstance(v, str) and v.strip():
                     out[kk] = v.strip()
-                AuthFlow._walk_collect_str_fields(v, wanted_keys, out, depth + 1, max_depth)
+                ClientMixin._walk_collect_str_fields(
+                    v, wanted_keys, out, depth + 1, max_depth
+                )
         elif isinstance(obj, list):
             for it in obj:
-                AuthFlow._walk_collect_str_fields(it, wanted_keys, out, depth + 1, max_depth)
+                ClientMixin._walk_collect_str_fields(
+                    it, wanted_keys, out, depth + 1, max_depth
+                )
 
     def fetch_client_auth_session_dump(self, stage: str = "") -> dict:
         """
@@ -376,11 +374,13 @@ class ClientMixin:
         )
         return data
 
+    @staticmethod
     def _is_tls_error(exc: Exception) -> bool:
         msg = str(exc).lower()
         markers = ["curl: (35)", "tls connect error", "openssl_internal", "sslerror"]
         return any(m in msg for m in markers)
 
+    @staticmethod
     def _is_registration_disallowed_error(exc: Exception) -> bool:
         msg = str(exc).lower()
         return "registration_disallowed" in msg
@@ -415,6 +415,7 @@ class ClientMixin:
         except Exception:
             return ""
 
+    @staticmethod
     def _extract_query_first(url: str, keys: list[str]) -> str:
         if not url:
             return ""
@@ -428,6 +429,7 @@ class ClientMixin:
                 return val
         return ""
 
+    @staticmethod
     def _extract_page_type(resp_json: dict | None) -> str:
         if not isinstance(resp_json, dict):
             return ""
@@ -436,6 +438,7 @@ class ClientMixin:
             return ""
         return (page.get("type", "") or "").strip()
 
+    @staticmethod
     def _extract_continue_url_from_step(resp_json: dict | None) -> str:
         """
         从 auth step 响应提取 continue_url：
@@ -457,6 +460,7 @@ class ClientMixin:
             return ""
         return (payload.get("url", "") or "").strip()
 
+    @staticmethod
     def _b64url_no_pad(raw: bytes) -> str:
         return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
 
@@ -490,6 +494,7 @@ class ClientMixin:
         )
         return True
 
+    @staticmethod
     def _datadog_trace_headers() -> dict:
         """生成 Datadog RUM 追踪头（对齐 gptfree-register 格式）。"""
         tid = f"{random.getrandbits(64):016x}"

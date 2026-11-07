@@ -150,6 +150,14 @@ def test_proxy_and_mail_views_expose_operational_state():
     assert "consumed:" in mail_view
 
 
+def test_sms_view_supports_api668():
+    source = read_frontend("views/SmsConfig.vue")
+    assert '<el-radio value="api668">' in source
+    assert "API668（订单式号码 Token）" in source
+    assert "sms668_prefix" in source
+    assert "平台名称或 platform_id" in source
+
+
 def test_auto_loop_treats_cf_blocked_as_proxy_failure():
     source = (
         PROJECT_ROOT / "regix" / "services" / "auto_loop.py"
@@ -219,3 +227,16 @@ def test_session_json_is_persisted_and_exported(clean_db):
     assert 'd["session_json"]' in (
         PROJECT_ROOT / "regix" / "services" / "registration.py"
     ).read_text(encoding="utf-8")
+
+
+def test_registered_view_shows_plan_and_automatic_check_is_wired():
+    view = read_frontend("views/Registered.vue")
+    registration = (
+        PROJECT_ROOT / "regix" / "services" / "registration.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'label="套餐"' in view
+    assert "plan_label" in view
+    assert "_check_plan_after_registration(run_id, d)" in registration
+    assert '"phase": "checking_plan"' in registration
+    assert '"phase": "plan_checked"' in registration

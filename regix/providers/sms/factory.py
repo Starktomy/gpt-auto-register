@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .base import BaseSmsProvider
+from .api668 import Api668Provider
 from .smsbower import (
     SMS_DEFAULT_COUNTRY,
     _safe_bool,
@@ -15,7 +16,7 @@ from .smsbower import (
 def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
     """从配置创建 provider 实例。
 
-    provider_key: smsbower / herosms
+    provider_key: smsbower / herosms / api668
     config 字段：sms_api_key / sms_country / sms_service / sms_max_price /
                 sms_reuse_phone / sms_phone_success_max
     """
@@ -52,6 +53,16 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
                                 proxy=proxy,
                                 reuse_phone_to_max=reuse,
                                 phone_success_max=succ_max)
+    if pk in ("api668", "api_668", "668"):
+        return Api668Provider(
+            api_key=api_key,
+            base_url=str(config.get("sms668_base_url") or ""),
+            default_service=service,
+            default_country=country,
+            prefix=str(config.get("sms668_prefix") or "").strip(),
+            auth_scheme=str(config.get("sms668_auth_scheme") or "raw"),
+            proxy=proxy,
+        )
     raise RuntimeError(f"未知接码服务: {provider_key}")
 
 

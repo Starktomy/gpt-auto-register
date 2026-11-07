@@ -1,10 +1,7 @@
 """Mail provider, mail settings, and Remail order API routes."""
 
-from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -13,6 +10,7 @@ from ...providers.mail import (
     MailProviderError,
     create_mail_provider,
     get_provider_class,
+    list_pooled_providers,
     list_providers,
 )
 from ...storage import facade as db

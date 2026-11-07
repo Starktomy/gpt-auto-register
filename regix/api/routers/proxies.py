@@ -1,15 +1,13 @@
 """Proxy connectivity and proxy pool API routes."""
 
-from __future__ import annotations
 
-import json
-from urllib.parse import urlparse
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ...http.client import create_http_session
 from ...storage import facade as db
+from ...http.client import create_http_session
 
 router = APIRouter()
 
@@ -31,15 +29,6 @@ def api_proxy_test(req: ProxyTestReq):
 
     协议说明：不写协议的 `ip:port` 被 curl 按 HTTP 代理处理；SOCKS5 需显式写 socks5://。
     """
-    import sys as _sys
-    ROOT_DIR = Path(__file__).resolve().parents[2]
-    if str(ROOT_DIR) not in _sys.path:
-        _sys.path.insert(0, str(ROOT_DIR))
-    try:
-        from regix.http.client import create_http_session
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"加载 http_client 失败: {e}")
-
     import time as _t
     from concurrent.futures import ThreadPoolExecutor
 
@@ -162,15 +151,6 @@ def api_proxy_pool_ipv6_test(req: ProxyIpv6TestReq):
     检测方式：走 cloudflare.com/cdn-cgi/trace，它会同时返回 ip 和 ipv6 两个字段
     —— ip 是客户端 IPv4，ipv6 是客户端 IPv6。有 ipv6 字段且非空 → 支持。
     """
-    import sys as _sys
-    ROOT_DIR = Path(__file__).resolve().parents[2]
-    if str(ROOT_DIR) not in _sys.path:
-        _sys.path.insert(0, str(ROOT_DIR))
-    try:
-        from regix.http.client import create_http_session
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"加载 http_client 失败: {e}")
-
     import re as _re
     import time as _t
     from concurrent.futures import ThreadPoolExecutor

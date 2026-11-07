@@ -17,16 +17,11 @@
 """
 from __future__ import annotations
 
-import base64
-import json
 import os
-import random
 import sqlite3
 import sys
 import threading
-import time
 from pathlib import Path
-from typing import Optional
 
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:

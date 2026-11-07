@@ -1,25 +1,17 @@
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
 import logging
 import os
-import random
-import re
 import secrets
-import struct
-import subprocess
 import time
 import uuid
-from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
 from regix.providers.mail import MailProvider
+
+from .models import _totp_now
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +91,7 @@ class OAuthMixin:
         auth_url = f"https://auth.openai.com/oauth/authorize?{urlencode(params)}"
         return auth_url, state, verifier, redirect_uri, client_id
 
+    @staticmethod
     def _callback_has_code(url: str, redirect_uri: str) -> bool:
         if not url:
             return False
@@ -179,6 +172,7 @@ class OAuthMixin:
             current = loc
         return callback_url, current
 
+    @staticmethod
     def _drop_query_keys(url: str, drop_keys: set[str]) -> str:
         if not url:
             return ""

@@ -550,7 +550,7 @@ class RemailMailProvider(MailProvider):
             if fetch.get("lastStatus") == "abnormal":
                 safe_err = str(fetch.get("lastSafeError") or "").strip()
                 raise RuntimeError(
-                    f"Remail 取件异常: {safe_error or '平台未给出原因'}"
+                    f"Remail 取件异常: {safe_err or '平台未给出原因'}"
                     f"（邮箱 {email_addr}）"
                 )
 

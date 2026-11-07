@@ -22,8 +22,6 @@ import logging
 import random
 import string
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -180,7 +178,7 @@ class CFTempEmailProvider(MailProvider):
             except Exception:
                 e._text = ""
             e.text = e._text
-            e.json = lambda: _json.loads(e._text or "{}")
+            e.json = lambda e=e: _json.loads(e._text or "{}")
             return e
 
     @staticmethod

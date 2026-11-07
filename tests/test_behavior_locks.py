@@ -325,6 +325,7 @@ class TestSettingsRunsAndErrors:
             ("user_already_exists", "account"),
             ("invalid_state", "network"),
             ("connection reset", "network"),
+            ("No module named 'sentinel'", "network"),
             ("something unusual", "unknown"),
         ],
     )
@@ -456,6 +457,8 @@ class TestWebUIAuth:
             "/api/register",
             "/api/runs",
             "/api/registered",
+            "/api/registered/export/formats",
+            "/api/registered/export",
             "/api/mail/providers",
             "/api/mail/orders",
             "/api/settings/sms",
@@ -463,6 +466,33 @@ class TestWebUIAuth:
             "/api/auto/status",
         }
         assert expected <= paths
+
+    def test_openapi_schema_builds_without_unresolved_models(self):
+        import regix.api.app as app_module
+
+        schema = app_module.app.openapi()
+        assert "/api/register" in schema["paths"]
+        assert "RegisterReq" in schema["components"]["schemas"]
+        assert "ProxyPoolUpdateReq" in schema["components"]["schemas"]
+        assert "SaveSmsConfigReq" in schema["components"]["schemas"]
+
+        operations = []
+        for path, methods in schema["paths"].items():
+            for method in methods:
+                operations.append((method, path))
+        assert len(operations) == len(set(operations))
+
+    def test_register_request_validation_returns_422_not_500(self, monkeypatch):
+        import regix.api.app as app_module
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setattr(app_module, "ADMIN_PASSWORD", "")
+        app_module._AUTH_FAILED_TIMES.clear()
+        response = TestClient(app_module.app).post(
+            "/api/register",
+            json={"otp_timeout": "not-an-integer"},
+        )
+        assert response.status_code == 422, response.text
 
     def test_read_api_smoke_with_temp_db(self, monkeypatch):
         import regix.api.app as app_module
@@ -478,6 +508,7 @@ class TestWebUIAuth:
             "/api/proxy/pool",
             "/api/runs",
             "/api/registered",
+            "/api/registered/export/formats",
             "/api/mail/providers",
             "/api/mail/orders",
             "/api/settings/sms",
@@ -499,3 +530,22 @@ class TestWebUIAuth:
             hashlib.sha256(value.encode()).digest()
             == hashlib.sha256(value.encode()).digest()
         )
+
+
+class TestAuthFlowGuards:
+    def test_add_phone_is_only_entered_once_per_flow(self, monkeypatch):
+        from regix.config import Config
+        from regix.openai.auth_flow import AuthFlow
+
+        flow = AuthFlow(Config(), sms_callback=object())
+        calls = []
+        monkeypatch.setattr(
+            flow,
+            "_handle_add_phone_via_sms",
+            lambda continue_url="": calls.append(continue_url) or "next",
+        )
+
+        assert flow._handle_add_phone_verification("add-phone/1") == "next"
+        assert flow._handle_add_phone_verification("add-phone/2") == "add-phone/2"
+        assert calls == ["add-phone/1"]
+

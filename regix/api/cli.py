@@ -60,10 +60,7 @@ def main():
             sys.executable, "-m", "pip", "install",
             "fastapi", "uvicorn[standard]", "pydantic>=2",
         ])
-        import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
-
-    import uvicorn
 
     load_env_file(ROOT / ".env")
     public_host = args.host not in {"127.0.0.1", "localhost", "::1"}

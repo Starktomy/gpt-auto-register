@@ -1,25 +1,17 @@
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+import json
 import logging
 import os
 import random
 import re
-import secrets
-import struct
-import subprocess
 import time
 import uuid
-from datetime import datetime
-from typing import Any, Optional
-from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
-from regix.providers.mail import MailProvider
+from regix.fingerprint.generator import generate_fingerprint
+from regix.http.client import create_http_session
 
 logger = logging.getLogger(__name__)
 
@@ -636,6 +628,7 @@ class ProtocolMixin:
             logger.warning(f"send_otp 兜底失败(mode={mode_lc or 'unknown'}): {e}")
             return False
 
+    @staticmethod
     def _default_password_from_email(email: str) -> str:
         """⚠️ 这是**猜**出来的密码，不是这个号真的密码。
 
@@ -679,6 +672,7 @@ class ProtocolMixin:
                 logger.warning(f"account_callback 加载密码异常: {e}")
         return self._default_password_from_email(email), False
 
+    @staticmethod
     def _random_password(length: int = 16) -> str:
         import string
         upper = string.ascii_uppercase
@@ -970,6 +964,7 @@ class ProtocolMixin:
                     out = next_url
         return out
 
+    @staticmethod
     def _extract_workspace_id_from_html(html_text: str) -> str:
         """从 workspace 页面 HTML 文本中提取 workspace_id（兜底）。"""
         if not html_text:

@@ -98,7 +98,6 @@ from email.utils import parsedate_to_datetime
 from typing import Optional
 
 from .base import (
-    ConfigField,
     MailProvider,
     MailProviderError,
     extract_otp,

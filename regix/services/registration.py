@@ -8,16 +8,13 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import sys
 import threading
-import time
 import traceback
 import uuid
 from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[2]  # Regix/
-sys.path.insert(0, str(ROOT))
 
 from regix.config import Config  # noqa: E402
 from regix.openai.auth_flow import AuthFlow  # noqa: E402
@@ -119,6 +116,7 @@ _NETWORK_ERROR_PATTERNS = [
     "remote disconnected", "connection reset", "connection aborted",
     "max retries exceeded",
     "invalid_state",
+    "no module named",
 ]
 
 
@@ -535,6 +533,9 @@ def _do_register(
         #    所以那种情况要在这里补记一次（代理不在池里时 proxy_used 也不会命中，
         #    只是个记账，不会出错）。
 
+        # ─ 注册后自动查询套餐和 Plus 试用资格（失败不影响账号） ─
+        plan_info = _check_plan_after_registration(run_id, d)
+
         # Remail：把这笔订单关联到注册成功的账号，
         # 这样「邮箱服务」页能看出哪一单对应哪个号。
         order_no = str(getattr(mail, "_order_no", "") or "").strip()
@@ -566,6 +567,9 @@ def _do_register(
             # 2FA secret 一次性下发、服务端取不回，明文推前端让用户当场导入验证器
             # （理由同密码；本机自用工具，SSE 只发本地浏览器）。未绑则为空串。
             "totp_secret": d.get("totp_secret") or "",
+            "plan": plan_info.get("current_plan_type") or "",
+            "plan_label": plan_info.get("plan_label") or "",
+            "plus_check": plan_info,
             "partial": partial,
         }
         _emit_status(run_id, "done", result_summary)
@@ -715,6 +719,54 @@ def _try_export_to_panels(run_id: str, cred: dict) -> None:
         _emit_status(run_id, "phase", {"phase": "export_done", "summary": summary})
     except Exception:
         pass
+
+
+def _check_plan_after_registration(run_id: str, cred: dict) -> dict:
+    """Query plan/trial after saving credentials without affecting registration."""
+    email = str(cred.get("email") or "").strip().lower()
+    access_token = str(cred.get("access_token") or "").strip()
+    if not email or not access_token:
+        return {"status": "no_at", "label": "无AT"}
+
+    _emit_status(
+        run_id,
+        "phase",
+        {"phase": "checking_plan", "email": email},
+    )
+    from ..services.plan_check import check_registered_plan
+
+    try:
+        info = check_registered_plan(
+            email,
+            cred=cred,
+            proxy_url=str(cred.get("proxy") or ""),
+            device_id=str(cred.get("device_id") or ""),
+        )
+    except Exception as exc:
+        logging.getLogger("registrar").warning(
+            "[register] 套餐查询异常（账号仍有效）: %s", exc
+        )
+        info = {"status": "error", "label": "查询失败"}
+    _emit_status(
+        run_id,
+        "phase",
+        {
+            "phase": "plan_checked",
+            "email": email,
+            "plan": info.get("current_plan_type") or "",
+            "plan_label": info.get("plan_label") or "",
+            "status": info.get("status"),
+            "label": info.get("label"),
+        },
+    )
+    logging.getLogger("registrar").info(
+        "[register] 套餐查询 email=%s plan=%s plus_trial=%s status=%s",
+        email,
+        info.get("current_plan_type") or "unknown",
+        info.get("plus_trial_eligible"),
+        info.get("status"),
+    )
+    return info
 
 
 def _save_password_early(email: str, password: str) -> None:

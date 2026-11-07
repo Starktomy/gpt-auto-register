@@ -1,25 +1,16 @@
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+import json
 import logging
 import os
-import random
-import re
-import secrets
-import struct
-import subprocess
 import time
 import uuid
-from datetime import datetime
-from typing import Any, Optional
-from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
+from regix.http.client import create_http_session
 from regix.providers.mail import MailProvider
+
+from .models import AuthResult, _totp_now
 
 logger = logging.getLogger(__name__)
 

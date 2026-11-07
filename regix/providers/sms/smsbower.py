@@ -8,12 +8,11 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
 from .base import BaseSmsProvider, SmsActivation
-from .countries import SMS_COUNTRY_NAMES_CN
 
 logger = logging.getLogger(__name__)
 
@@ -393,7 +392,7 @@ class SmsBowerProvider(BaseSmsProvider):
                         "countryPhoneCode": "",
                     }
             raise RuntimeError(resp_text[:200] or "empty response")
-        except Exception as e:
+        except Exception:
             # 不在这里 fallback，让调用方的 for action 循环去试下个 action
             raise
 

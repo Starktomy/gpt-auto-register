@@ -274,15 +274,15 @@ def _registered_where(filt: str) -> str:
     if filt == "unchecked":
         return "WHERE (extra_json IS NULL OR extra_json NOT LIKE '%\"plus_check\"%')"
     if filt == "free":
-        return "WHERE extra_json LIKE '%\"free\"%'"
+        return "WHERE extra_json LIKE '%\"status\": \"free\"%'"
     if filt == "plus":
-        return "WHERE (extra_json LIKE '%\"plus_eligible\"%' OR extra_json LIKE '%\"plus_active\"%')"
+        return "WHERE (extra_json LIKE '%\"status\": \"plus_eligible\"%' OR extra_json LIKE '%\"status\": \"plus_active\"%')"
     if filt == "banned":
-        return "WHERE extra_json LIKE '%\"banned\"%'"
+        return "WHERE extra_json LIKE '%\"status\": \"banned\"%'"
     if filt == "token_invalid":
         # token_invalid 从 2026-08-10 起会写库，得能筛出来，否则等于埋了：
         # 它既不在 unchecked 里（已有结论），又不在 free/plus/banned 里。
-        return "WHERE extra_json LIKE '%\"token_invalid\"%'"
+        return "WHERE extra_json LIKE '%\"status\": \"token_invalid\"%'"
     return ""
 
 

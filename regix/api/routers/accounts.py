@@ -1,17 +1,13 @@
 """Account import, pool, result, and preference API routes."""
 
-from __future__ import annotations
 
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ...providers.mail import (
-    ImportValidationError,
-    MailProviderError,
-    get_provider_class,
-)
+from ...providers.mail import ImportValidationError, MailProviderError
 from ...storage import facade as db
 
 router = APIRouter()
@@ -24,34 +20,6 @@ class ImportReq(BaseModel):
         description="邮箱来源（outlook / ...）。留空则按段数猜，"
                     "但 Outlook 和 Gmail 都是 4 段，猜不出来，建议前端必填",
     )
-
-
-class RegisterReq(BaseModel):
-    email: Optional[str] = Field(None, description="留空 = 自动 claim 下一个 available")
-    want_access_token: bool = True
-    want_session_token: bool = True
-    # ⚠️ 默认 **False**：拿 refresh_token 要跑 Codex OAuth 授权链，而那条链
-    #    可能**再发一封验证码**（auth_flow 的 need_otp 分支）—— 对短效邮箱
-    #    （code 模式，一次性）是致命的。前端两个页面也默认关。
-    #    真实默认值由前端的 wantRefreshToken / autoWantRefreshToken 决定；
-    #    这里的 default 只是「调用方没传这个字段」时的兜底。
-    want_refresh_token: bool = False
-    proxy: str = ""
-    otp_timeout: int = 10
-    allow_existing_login: bool = True
-    # 注册成功后自动绑定 TOTP 2FA。前端两个页面都**默认开**（主人要求每个号都绑）。
-    # 这里的 default 保持 False —— 它只在「调用方没传这个字段」时生效，是给旧前端
-    # 缓存 / 直接打 API 的保守兜底：漏传时宁可不绑，也不替调用方做一个不可逆的决定。
-    # 真实默认值由前端 form store 的 want2fa / autoWant2fa 决定。
-    want_2fa: bool = False
-
-
-# ──────────────────────── API ────────────────────────
-
-
-@router.get("/api/health")
-def health():
-    return {"ok": True, "stats": db.stats()}
 
 
 @router.post("/api/import")

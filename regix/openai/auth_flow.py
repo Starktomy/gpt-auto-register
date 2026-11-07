@@ -99,6 +99,7 @@ class AuthFlow(
         self._client_auth_session_id: str = ""
         self._dump_login_verifier: str = ""
         self._codex_rt_attempted: bool = False
+        self._sms_phone_attempted: bool = False
         self._trace_dump_enabled = str(os.getenv("AUTH_TRACE_DUMP", "0")).lower() in ("1", "true", "yes", "on")
         self._trace_include_cookie = str(os.getenv("AUTH_TRACE_INCLUDE_COOKIE", "0")).lower() in (
             "1", "true", "yes", "on"

@@ -1,24 +1,12 @@
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+import json
 import logging
 import os
-import random
-import re
-import secrets
-import struct
-import subprocess
-import time
-import uuid
-from datetime import datetime
-from typing import Any, Optional
-from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
 from regix.providers.mail import MailProvider
 
 logger = logging.getLogger(__name__)
@@ -53,16 +41,20 @@ class TokenMixin:
                 auth_url, redirect_uri, "codex_authorize"
             )
 
-            # 若被打回 /log-in，补走一次协议登录，再继续授权链路
-            if (not callback_url) and "/log-in" in (final_url or ""):
+            login_attempted = False
+
+            def _drive_login_once() -> None:
+                nonlocal callback_url, final_url, login_attempted
+                if login_attempted:
+                    return
+                login_attempted = True
                 logger.info("Codex 授权回落到 /log-in，尝试协议推进登录状态...")
-                continue_url = ""
                 try:
                     continue_url = self._codex_drive_login_from_log_in(mail_provider=mail_provider)
                 except Exception as e:
                     logger.warning(f"Codex 登录推进失败，改走 no-prompt 兜底: {e}")
+                    return
                 if continue_url:
-                    # 命中 add-phone 时，支持“刷新重试”策略（不立刻放弃）
                     if self._is_add_phone_state(page_type="", continue_url=continue_url) and self._env_flag(
                         "OAUTH_CODEX_ADD_PHONE_REFRESH_RETRY", "1"
                     ):
@@ -87,6 +79,12 @@ class TokenMixin:
                             redirect_uri,
                             "codex_post_login",
                         )
+
+            # The initial authorize can redirect to /log-in. Some auth sessions
+            # only reveal that after removing prompt=login, so this is checked
+            # again after the no-prompt fallback below.
+            if (not callback_url) and "/log-in" in (final_url or ""):
+                _drive_login_once()
 
             # Codex authorize 直接被打到 /add-phone（不经过 /log-in）：
             # 如果配了 SMS 接码 controller，先把手机号绑了再重新 authorize
@@ -119,6 +117,9 @@ class TokenMixin:
                         redirect_uri,
                         "codex_authorize_noprompt",
                     )
+
+            if (not callback_url) and "/log-in" in (final_url or ""):
+                _drive_login_once()
 
             if not callback_url:
                 logger.warning("Codex OAuth 未捕获 callback code, final=%s", (final_url or "")[:180])
@@ -164,6 +165,7 @@ class TokenMixin:
             logger.warning(f"注入 PKCE 参数失败，回退原始 auth_url: {e}")
             return auth_url
 
+    @staticmethod
     def _safe_b64url_decode_text(data: str) -> str:
         if not data:
             return ""

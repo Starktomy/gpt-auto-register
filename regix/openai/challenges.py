@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import logging
 import os
-import random
 import re
-import secrets
-import struct
 import subprocess
 import time
-import uuid
-from datetime import datetime
-from typing import Any, Optional
-from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from typing import Optional
 
-from regix.config import Config
-from regix.fingerprint.generator import fingerprint_for_impersonate, generate_fingerprint, ua_for_impersonate
-from regix.http.client import USER_AGENT, create_http_session
-from regix.providers.mail import MailProvider
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +14,13 @@ logger = logging.getLogger(__name__)
 class ChallengeMixin:
     """Protocol methods for this domain."""
 
+    @staticmethod
     def _is_add_phone_state(page_type: str = "", continue_url: str = "") -> bool:
         pt = (page_type or "").strip().lower()
         cu = (continue_url or "").strip().lower()
         return (pt == "add_phone") or ("add-phone" in cu)
 
+    @staticmethod
     def _is_mfa_challenge_state(page_type: str = "", continue_url: str = "") -> bool:
         """判断是否进入 mfa-challenge 状态（已有账号启用 2FA，密码验证后需要 TOTP 码）。"""
         pt = (page_type or "").strip().lower()
@@ -67,10 +56,8 @@ class ChallengeMixin:
             try:
                 data = resp.json()
                 msg = data.get("error", {}).get("message", "")
-                code = data.get("error", {}).get("code", "")
             except Exception:
                 msg = resp.text[:150]
-                code = ""
             # 抛异常时只带 message（不带完整 JSON），让上层日志更简洁
             raise RuntimeError(msg or f"HTTP {resp.status_code}")
 
@@ -105,6 +92,7 @@ class ChallengeMixin:
         except Exception:
             return {}
 
+    @staticmethod
     def _extract_otp6(text: str) -> str:
         if not text:
             return ""
@@ -144,6 +132,13 @@ class ChallengeMixin:
         - 优先使用 self._sms_callback（SMS 接码 controller，自动租号 + 接码）
         - 回退到环境变量路径：OPENAI_PHONE_NUMBER + OPENAI_PHONE_OTP_CMD/OPENAI_PHONE_OTP
         """
+        if self._sms_phone_attempted:
+            logger.warning(
+                "本 AuthFlow 已尝试过 add-phone，拒绝重复租号；"
+                "单次流程内的换号由 SMS loop 自己处理"
+            )
+            return continue_url or ""
+        self._sms_phone_attempted = True
         if self._sms_callback is not None:
             try:
                 return self._handle_add_phone_via_sms(continue_url)
@@ -158,7 +153,7 @@ class ChallengeMixin:
     def _handle_add_phone_via_sms(self, continue_url: str = "") -> str:
         """走 SMS 接码 controller：租号 → add-phone/send → 等 SMS → validate。
 
-        支持平台：SmsBower（smsbower.page）。
+        支持平台：SmsBower、HeroSMS、API668（通过统一 PhoneCallbackController）。
         单号窗口 80s（每 20s × 3 触发一次 OpenAI 端 resend）；失败自动 cancel + 换新号。
         最多换号次数默认 3，主人可在 WebUI / 环境变量 OPENAI_PHONE_MAX_ATTEMPTS 自定义。
         """
@@ -184,7 +179,7 @@ class ChallengeMixin:
 
     def _do_sms_loop(self, ctrl) -> str:
         """SMS 接码循环逻辑（for 0..max_attempts）。"""
-        # provider 信息（目前只支持 SmsBower）
+        # provider 信息
         provider_key = (getattr(ctrl, "provider_key", "") or "").lower()
 
         # 优先从 controller.config 读（前端配置） → 环境变量兜底 → 用默认
@@ -294,8 +289,6 @@ class ChallengeMixin:
             phone_start = time.time()
             seen_codes: set[str] = set()
             code_attempt = 0
-            phone_used = False
-
             while time.time() - phone_start < per_phone_timeout and code_attempt < max_code_retries_per_phone:
                 remaining = per_phone_timeout - (time.time() - phone_start)
                 if remaining < 10:
@@ -312,7 +305,6 @@ class ChallengeMixin:
                     logger.warning("[sms] 收到重复 code=%s，跳过", code)
                     continue
                 seen_codes.add(code)
-                phone_used = True
 
                 try:
                     validate_resp = self._phone_otp_validate(code)
@@ -322,7 +314,7 @@ class ChallengeMixin:
                     logger.info("[sms] ✅ phone-otp/validate 通过 (phone=%s code=%s) next=%s",
                                 phone, code, (next_url or "")[:160])
                     ctrl.report_success()
-                    return next_url or continue_url or ""
+                    return next_url or ""
                 except Exception as e:
                     last_err = e
                     err_text = str(e)

@@ -8,6 +8,7 @@ from .countries import (  # noqa: F401
     SMS_COUNTRY_NAMES_CN,
     country_label,
 )
+from .api668 import Api668Provider  # noqa: F401
 from .smsbower import (  # noqa: F401
     OPENAI_SMS_COUNTRIES,
     SMS_DEFAULT_COUNTRY,
@@ -25,6 +26,7 @@ __all__ = [
     "SMS_PHONE_LIFETIME",
     "BaseSmsProvider",
     "PhoneCallbackController",
+    "Api668Provider",
     "SmsActivation",
     "country_label",
     "create_sms_provider",
