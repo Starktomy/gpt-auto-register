@@ -121,18 +121,13 @@ container startup uses `regix.api.app:app` directly.
 
 1. 创建重构分支，例如 `refactor/project-structure`。
 2. 先提交或暂存当前 409/WebUI/passwordless 修复，不要把结构重构和业务修复混在同一个提交里。
-3. 运行现有测试：
+3. 历史基线曾由根目录脚本提供，现已合并进 pytest：
    ```bash
-   .venv/bin/python test_register_409_fixes.py
-   .venv/bin/python test_remail_provider.py
-   .venv/bin/python test_ui_fixes.py
-   .venv/bin/python test_integration.py
+   .venv/bin/python -m pytest
    ```
 4. 记录当前已知结果：
-   - `test_register_409_fixes.py`：通过。
-   - `test_remail_provider.py`：通过。
-   - `test_ui_fixes.py`：1 个旧断言仍把 `invalid_state` 期望为 `account`，和当前“网络/会话错误可重试”的修复方向冲突，需要更新测试期望。
-   - `test_integration.py`：`/root/chatgpt2api` 不存在导致 1 项失败，应改为条件 skip。
+   - 原有失败断言已按当前 `invalid_state` 可重试语义修正。
+   - 外部 `chatgpt2api` 集成用例已删除，避免无关仓库影响本项目测试。
 5. 用一个临时数据库做 WebUI smoke test，不要触碰 `webui/webui.db`。
 
 ### Phase 1：建立包骨架和兼容层
@@ -330,10 +325,7 @@ route 拆分：
 
 ```bash
 .venv/bin/python -m compileall -q regix webui
-.venv/bin/python test_register_409_fixes.py
-.venv/bin/python test_remail_provider.py
-.venv/bin/python test_ui_fixes.py
-.venv/bin/python test_integration.py
+.venv/bin/python -m pytest
 ```
 
 再手工验证：

@@ -376,9 +376,7 @@ OTP validate 失败（phone-otp/validate 401）时自动 resend 一次再等新�
 ## 测试
 
 ```bash
-python test_integration.py
-python test_remail_provider.py
-python test_ui_fixes.py
+.venv/bin/python -m pytest
 ```
 
 测试使用独立的临时数据库，**不会污染生产库**。
