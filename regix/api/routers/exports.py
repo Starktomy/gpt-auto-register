@@ -199,13 +199,21 @@ def api_check_plus(req: CheckPlusReq):
     """Query plan and Plus trial eligibility for registered accounts."""
     from ...services.plan_check import check_registered_plan
 
+    from ...storage import facade as db
+
     results = {}
     for email in dict.fromkeys(req.emails):
         normalized = str(email or "").strip().lower()
         if not normalized:
             continue
+        # 没显式指定代理时，逐号用它**注册时**的出口 IP —— 账号在哪个 IP 上
+        # 注册的，就还在哪个 IP 上检测，别让同一个号今天走 A 明天走 B。
+        row = db.get_registered(normalized) or {}
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        effective_proxy = req.proxy.strip() or str(extra.get("proxy") or "").strip()
         results[normalized] = check_registered_plan(
             normalized,
-            proxy_url=req.proxy.strip(),
+            cred=row or None,
+            proxy_url=effective_proxy,
         )
     return {"ok": True, "results": results}

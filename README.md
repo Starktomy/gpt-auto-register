@@ -194,9 +194,29 @@ CLI：`regix payment-link <email> [--plan plus|team] [--profile paypal_de] [--co
 > 凭证不出后端：前端只传邮箱和选项，access_token / cookie / device_id 由后端
 > 从本地库里读。
 
+**支付接口只认 Codex 客户端签发的 access token**。库里存的
+`access_token` 是网页 session 发的，直接拿去调用会被回
+`Our systems have detected unusual activity`——看着像封号，其实只是 token 来源不对。
+所以服务层会先用这个号的 `refresh_token` 换一枚 Codex token 再去建 checkout。
+没有 `refresh_token` 的老号，跑一次：
+
+```bash
+regix codex-login <email>     # 重登 + Codex OAuth，拿回 RT（可能触发短信验证）
+```
+
+WebUI 里点「生成支付链接」失败时会直接给出「重登换 Codex token」按钮。
+
 **账单国家必须与请求出口 IP 的国家一致**，否则 OpenAI 直接拒
 （`Billing country must match request country`）。弹窗会自动选中当前出口 IP
 所在国家；要用别的区域（如欧元区看 PayPal），得先让这个号走对应地区的代理。
+
+**优惠可以手输，也可以读账号**：弹窗里「优惠码」填自定义码（`promo_code`），
+「试用活动」填官方活动 id（`promo_campaign`）；点「读取账号」会用这个号
+`plus_check.plus_trial_campaign_id` 自动填上。
+
+**出口 IP 会沿用注册时的代理**：注册用的代理存在 `registered.extra.proxy`，
+支付链接和批量「检查 Plus」在没显式指定代理时都会用它，避免一个号注册在一个 IP、
+检测/付款又换到另一个 IP。
 
 实测结论（2026-11）：
 
@@ -262,6 +282,7 @@ regix status                   # 查看号池、代理、偏好和运行中任�
 regix accounts --status available
 regix runs --limit 10
 regix registered --limit 10
+regix codex-login <email>           # 没有 RT 的老号：重登 + Codex OAuth 补一个
 regix payment-link <email>          # 生成 Plus/Team 支付链接
 regix payment-link <email> --plan team --seats 5 --interval year
 regix payment-profiles              # 列出支付区域预设（国家/币种）

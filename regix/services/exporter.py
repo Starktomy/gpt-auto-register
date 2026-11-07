@@ -29,10 +29,13 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# OpenAI / Codex 常量
-OPENAI_TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
-CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_SCOPE = "openid email profile offline_access"
+# OpenAI / Codex 常量（实现在 regix.openai.codex_token，这里转发以便既有调用方继续用）
+from regix.openai.codex_token import (  # noqa: E402
+    CODEX_CLIENT_ID,
+    CODEX_SCOPE,
+    OPENAI_TOKEN_ENDPOINT,
+    refresh_codex_token as _refresh_codex_token,
+)
 
 # 默认值
 DEFAULT_TIMEOUT = 30
@@ -133,60 +136,10 @@ def _import_cffi_mime():
 def refresh_codex_token(refresh_token: str, *, timeout: int = DEFAULT_TIMEOUT) -> dict:
     """用 Codex refresh_token 换一组新的 access_token / id_token / refresh_token(滚动)。
 
-    参考 any-regix/platforms/chatgpt/token_refresh.py 风格。
-
-    返回 OpenAI 原始响应 dict：
-        {access_token, refresh_token, id_token, expires_in, token_type}
-    失败抛 RuntimeError。
+    实现在 :mod:`regix.openai.codex_token`（支付链接那条链也要用），
+    这里保留原名以兼容既有调用方。
     """
-    rt = str(refresh_token or "").strip()
-    if not rt:
-        raise RuntimeError("缺少 refresh_token，无法刷新 Codex access_token")
-
-    cffi = _import_cffi()
-    body = {
-        "grant_type": "refresh_token",
-        "client_id": CODEX_CLIENT_ID,
-        "refresh_token": rt,
-        "scope": CODEX_SCOPE,
-    }
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-        "Origin": "https://auth.openai.com",
-        "Referer": "https://auth.openai.com/",
-    }
-
-    resp = cffi.post(
-        OPENAI_TOKEN_ENDPOINT,
-        headers=headers,
-        data=body,
-        proxies=None,
-        verify=False,
-        timeout=timeout,
-        impersonate="chrome110",
-    )
-
-    if resp.status_code != 200:
-        body_text = ""
-        try:
-            body_text = (resp.text or "")[:300]
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"OpenAI token 刷新失败 HTTP {resp.status_code}: {body_text}"
-        )
-
-    try:
-        data = resp.json()
-    except Exception:
-        raise RuntimeError("OpenAI token 刷新返回非 JSON")
-
-    if not isinstance(data, dict) or not data.get("access_token"):
-        raise RuntimeError(f"OpenAI token 刷新返回无 access_token: {str(data)[:200]}")
-
-    return data
-
+    return _refresh_codex_token(refresh_token, timeout=timeout)
 
 # ──────────────────────── CPA：生成 token JSON ────────────────────────
 

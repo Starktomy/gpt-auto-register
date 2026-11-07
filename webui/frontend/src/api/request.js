@@ -33,6 +33,8 @@ http.interceptors.response.use(
     const err = new Error(detail)
     err.status = error?.response?.status
     err.data = data
+    // 后端用 4xx + {detail, code} 报告可分类的错误（如 codex_token_missing）
+    err.code = data?.code || ''
     return Promise.reject(err)
   },
 )

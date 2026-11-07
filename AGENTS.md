@@ -179,46 +179,68 @@ OpenAI routes most countries to WhatsApp. Pure SMS currently works only for
 Thailand (`country_id=52` / `sms_country=52`). Warn, do not silently retry,
 when auto-selection cannot find a whitelisted country.
 
-### 2.13 Payment links: the billing country must match the exit IP
+### 2.13 Payment links: Codex token, billing country, promo fields
 
-`POST /backend-api/payments/checkout` compares `billing_details.country`
-against the country the request **exits from**. A preset that does not match
-is rejected with HTTP 400 and the body
-`Billing country must match request country.`
+Three independent rules decide whether `POST
+/backend-api/payments/checkout` succeeds. Check them in this order.
 
-That body and a risk block share the same status code, so
-`_classify_checkout_error()` in `regix/services/payment.py` splits them by
-message text:
+**1. The access token must be minted by the Codex client.** This one is not
+obvious and cost hours to find. OpenAI's response to a wrong token flavour is
 
-| Response text | Error code | Meaning |
+    HTTP 400 {"detail": "Our systems have detected unusual activity. Please try again later."}
+
+which reads like an account-level fraud block but is not one. Decode the JWT
+and look at `client_id` / `amr`:
+
+| Token source | `client_id` claim | Result |
 | --- | --- | --- |
-| `Billing country must match request country.` | `checkout_country_mismatch` | the chosen preset does not fit the exit IP |
-| `Our systems have detected unusual activity.` | `checkout_risk_blocked` | OpenAI's risk engine flagged the account or its exit IP |
+| web session (`registered.access_token`) | `app_X8zY6vW2pQ9tR3dE7nK1jL5gH`, `amr=otp` | 400 "unusual activity" |
+| Codex client (`refresh_token` exchange) | `app_EMoamEEZ73f0CkXaXp7hrann` | 200, checkout session created |
 
-The risk block is **per account, not per request shape and not per IP**.
-Measured on five accounts from the same exit IP:
+Measured on the same account back to back; all 8 accounts that have a
+`refresh_token` produced links this way. So `resolve_checkout_token()` in
+`regix/services/payment.py` exchanges the stored refresh token for a Codex
+access token (`regix/openai/codex_token.py`) and only falls back to the stored
+web token when there is no refresh token.
 
-- The account created first (20:01) can create checkout sessions; the four
-  created later the same evening (20:41 - 21:36) cannot.
-- Changing the exit IP for the checkout request does not help: three pool
-  proxies (exit IPs 50.127.113.71 / 71.57.138.120 / 35.150.235.178), the host
-  IP, and `hosted` as well as `custom` checkout mode all returned the same
-  400.
-- The sessions of the blocked accounts are **valid**: `GET /api/auth/session`
-  returns 200 with the right user and `GET /backend-api/accounts/check/...`
-  returns 200 for all of them. The marker is OpenAI's risk engine, not a
-  broken credential and not the Codex OAuth chain (the one working account has
-  a refresh token and id token, and so does one of the blocked ones).
+Accounts registered **without** the Codex chain have no refresh token and
+cannot create a checkout session. They need one re-login, which is exactly the
+same Codex OAuth flow the registration already runs:
+`regix codex-login <email>` / `POST /api/payment/prepare` calls
+`AuthFlow.run_protocol_login()` followed by `oauth_codex_rt_exchange()` and
+stores the new refresh token. That login usually hits `/add-phone`, so it needs
+the SMS provider and costs one number per account.
 
-Do not try to "fix" it by reshuffling request headers, by re-login, or by
-retrying in a loop — it only burns quota on the exit IP. The lever that does
-work is **signup-side**: the accounts that were created from an already
-distrusted exit IP inherit the marker, so register and pay from the same
-clean proxy.
+Never "fix" a 400 here by changing headers, IP, checkout mode or account data:
+if `client_id` is the web client, the request is wrong no matter what else you
+change. Error codes keep the two cases apart: `codex_token_missing` /
+`codex_token_refresh_failed` mean the token, `checkout_risk_blocked` means a
+real risk-engine answer after a Codex token was used.
 
-`detect_exit_country()` resolves the exit country through the *same proxy* the
-checkout request would use. The WebUI shows it next to the preset list and
-warns before the request when the chosen preset disagrees with it.
+**2. The billing country must match the exit IP.** A mismatch returns
+`Billing country must match request country.`, mapped to
+`checkout_country_mismatch`. `detect_exit_country()` resolves the exit country
+through the same proxy the checkout would use; the WebUI preselects it and
+warns before the request.
+
+**3. Promo fields are two different things.** `promo_code` is a free-form
+coupon the user types. `promo_campaign` is the official trial campaign
+object:
+
+```json
+{"promo_campaign": {"promo_campaign_id": "plus-1-month-free",
+                    "is_coupon_from_query_param": false}}
+```
+
+Both may be sent together; leave them out when empty. The payment dialog can
+fill the campaign id from the account (`GET /api/payment/account/{email}`
+returns `plus_check.plus_trial_campaign_id`) or accept a hand-typed value.
+
+**Keep the account on one IP.** The registrar stores the proxy it used in
+`registered.extra.proxy`. Both the payment link and the bulk Plus check fall
+back to that proxy when the caller does not pass one explicitly, so an account
+is not registered on one IP and exercised on another. Do not remove that
+fallback.
 
 ### 2.14 A Cloudflare 403 at the OAuth init is fingerprint-level
 
@@ -483,7 +505,9 @@ regix status                          # pool, proxy, prefs, running tasks
 regix accounts --status available
 regix runs --limit 10
 regix registered --limit 10
+regix codex-login <email>              # one-time Codex OAuth for accounts without a RT
 regix payment-link <email>             # Plus/Team checkout links
+regix payment-link <email> --promo-campaign plus-1-month-free
 regix payment-link <email> --plan team --seats 5 --interval year
 regix payment-profiles                 # list the country/currency presets
 regix api get /api/settings/prefs     # passthrough for everything else

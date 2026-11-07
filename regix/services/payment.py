@@ -31,6 +31,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from regix.http.client import create_http_session
+from regix.openai.codex_token import refresh_codex_token
 from regix.services.plan_check import normalize_access_token, token_claims
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,7 @@ def build_checkout_body(
     interval: str = "month",
     seats: int = 2,
     promo_code: str = "",
+    promo_campaign_id: str = "",
 ) -> dict:
     """Build the ``/backend-api/payments/checkout`` request body.
 
@@ -263,6 +265,16 @@ def build_checkout_body(
             "workspace_name": str(workspace_name or "").strip() or "我的工作区",
             "price_interval": "year" if str(interval).strip().lower() == "year" else "month",
             "seat_quantity": max(1, int(seats or 2)),
+        }
+    # 两种优惠是**不同字段**：
+    #   promo_code      自定义优惠码（用户手输，比如 SAVE20）
+    #   promo_campaign  官方试用活动 id（例如 plus-1-month-free），走对象结构
+    # 参考实现 openai-plus-vxt 用的就是后者；两者可以并存，互不覆盖。
+    campaign = str(promo_campaign_id or "").strip()
+    if campaign:
+        body["promo_campaign"] = {
+            "promo_campaign_id": campaign,
+            "is_coupon_from_query_param": False,
         }
     promo = str(promo_code or "").strip()
     if promo:
@@ -605,6 +617,7 @@ def generate_payment_link(
     interval: str = "month",
     seats: int = 2,
     promo_code: str = "",
+    promo_campaign_id: str = "",
     timeout_seconds: float = 20.0,
     session_factory: Callable[[], Any] | None = None,
 ) -> PaymentLink:
@@ -628,6 +641,7 @@ def generate_payment_link(
         interval=interval,
         seats=seats,
         promo_code=promo_code,
+        promo_campaign_id=promo_campaign_id,
     )
     plan_key = normalize_plan(plan)
 
@@ -706,6 +720,37 @@ def generate_payment_link(
                 pass
 
 
+def resolve_checkout_token(row: dict, *, proxy: str = "") -> tuple[str, str]:
+    """Pick the access token the checkout endpoint actually accepts.
+
+    The payments endpoint only accepts an access token minted by the **Codex
+    client**. The token in ``registered.access_token`` comes from the web
+    session endpoint and is rejected with
+
+        HTTP 400 {"detail": "Our systems have detected unusual activity. ..."}
+
+    which reads like an account-level fraud block but is only a token-flavour
+    problem. Measured 2026-11-07: web-session token -> 400, Codex token ->
+    200, on the *same* account.
+
+    Returns ``(access_token, source)`` where source is ``codex_refresh``,
+    ``session`` or ``codex_refresh_failed``.
+    """
+    stored = str((row or {}).get("access_token") or "").strip()
+    refresh = str((row or {}).get("refresh_token") or "").strip()
+    if refresh:
+        try:
+            fresh = refresh_codex_token(refresh, proxy=proxy)
+            token = str(fresh.get("access_token") or "").strip()
+            if token:
+                return token, "codex_refresh"
+            logger.warning("[payment] Codex token 刷新返回里没有 access_token")
+        except Exception as exc:  # noqa: BLE001 - fall back to the stored token
+            logger.warning("[payment] Codex token 刷新失败，改用库里的 access_token: %s", exc)
+            return stored, "codex_refresh_failed"
+    return stored, "session"
+
+
 def generate_payment_link_for_account(
     email: str,
     *,
@@ -718,6 +763,7 @@ def generate_payment_link_for_account(
     interval: str = "month",
     seats: int = 2,
     promo_code: str = "",
+    promo_campaign_id: str = "",
     proxy: str = "",
     timeout_seconds: float = 20.0,
 ) -> PaymentLink:
@@ -736,26 +782,48 @@ def generate_payment_link_for_account(
     if not row:
         raise PaymentLinkError("account_not_found")
 
-    token = str(row.get("access_token") or "").strip()
-    if not token:
-        raise PaymentLinkError("access_token_missing")
-
     extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
     effective_proxy = str(proxy or "").strip() or str(extra.get("proxy") or "").strip()
 
-    return generate_payment_link(
-        token,
-        cookie_header=str(row.get("cookie_header") or ""),
-        device_id=str(row.get("device_id") or ""),
-        proxy=effective_proxy,
-        plan=plan,
-        profile=profile,
-        country=country,
-        currency=currency,
-        locale=locale,
-        workspace_name=workspace_name,
-        interval=interval,
-        seats=seats,
-        promo_code=promo_code,
-        timeout_seconds=timeout_seconds,
-    )
+    token, token_source = resolve_checkout_token(row, proxy=effective_proxy)
+    if not token:
+        raise PaymentLinkError("access_token_missing")
+
+    try:
+        link = generate_payment_link(
+            token,
+            cookie_header=str(row.get("cookie_header") or ""),
+            device_id=str(row.get("device_id") or ""),
+            proxy=effective_proxy,
+            plan=plan,
+            profile=profile,
+            country=country,
+            currency=currency,
+            locale=locale,
+            workspace_name=workspace_name,
+            interval=interval,
+            seats=seats,
+            promo_code=promo_code,
+            promo_campaign_id=promo_campaign_id,
+            timeout_seconds=timeout_seconds,
+        )
+    except PaymentLinkError as exc:
+        # 把「token 用错了」从「账号被风控」里拆出来，否则用户看到的是
+        # "unusual activity"，会以为是号废了。
+        if exc.code == "checkout_risk_blocked" and token_source == "session":
+            raise PaymentLinkError(
+                "codex_token_missing",
+                http_status=exc.http_status,
+                detail=exc.detail,
+            ) from exc
+        if exc.code == "checkout_risk_blocked" and token_source == "codex_refresh_failed":
+            raise PaymentLinkError(
+                "codex_token_refresh_failed",
+                http_status=exc.http_status,
+                detail=exc.detail,
+            ) from exc
+        raise
+    warnings = getattr(link, "warnings", None)
+    if isinstance(warnings, list):
+        warnings.append(f"token_source:{token_source}")
+    return link

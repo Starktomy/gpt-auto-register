@@ -7,7 +7,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { listPaymentProfiles, createPaymentLink } from '@/api/payment'
+import { listPaymentProfiles, createPaymentLink, preparePaymentToken, getPaymentAccount } from '@/api/payment'
 import { copyText } from '@/api/request'
 
 const props = defineProps({
@@ -29,7 +29,11 @@ const seats = ref(2)
 const interval = ref('month')
 const workspaceName = ref('')
 const promoCode = ref('')
+const promoCampaign = ref('')
+const account = ref(null)
 const loading = ref(false)
+const preparing = ref(false)
+const needsCodexToken = ref(false)
 const result = ref(null)
 
 const LINKS = [
@@ -56,7 +60,12 @@ watch(
     if (!open) return
     result.value = null
     loading.value = false
+    needsCodexToken.value = false
+    account.value = null
+    promoCode.value = ''
+    promoCampaign.value = ''
     loadProfiles()
+    loadAccount()
   },
 )
 
@@ -76,6 +85,25 @@ async function loadProfiles() {
   }
 }
 
+async function loadAccount() {
+  if (!props.email) return
+  try {
+    account.value = await getPaymentAccount(props.email)
+  } catch (e) {
+    // 元数据只是辅助信息，读不到不阻塞生成
+    account.value = null
+  }
+}
+
+function useAccountCampaign() {
+  if (account.value?.promo_campaign_id) {
+    promoCampaign.value = account.value.promo_campaign_id
+    ElMessage.success('已填入账号可用的试用活动')
+  } else {
+    ElMessage.info('该账号没有可读取的试用活动')
+  }
+}
+
 async function generate() {
   if (!props.email) { ElMessage.warning('没有选中账号'); return }
   loading.value = true
@@ -89,13 +117,32 @@ async function generate() {
       interval: interval.value,
       workspace_name: workspaceName.value,
       promo_code: promoCode.value,
+      promo_campaign_id: promoCampaign.value,
     })
     result.value = data
     ElMessage.success('支付链接已生成')
   } catch (e) {
+    // 支付接口只认 Codex 签发的 AT；这类号需要补跑一次 Codex OAuth
+    needsCodexToken.value = e.code === 'codex_token_missing'
+      || e.code === 'codex_token_refresh_failed'
     ElMessage.error('生成失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     loading.value = false
+  }
+}
+
+async function prepareCodexToken() {
+  if (!props.email) return
+  preparing.value = true
+  try {
+    await preparePaymentToken({ email: props.email })
+    needsCodexToken.value = false
+    ElMessage.success('已拿到 Codex token，正在重新生成…')
+    await generate()
+  } catch (e) {
+    ElMessage.error('重登失败: ' + (e.response?.data?.detail || e.message))
+  } finally {
+    preparing.value = false
   }
 }
 
@@ -154,9 +201,35 @@ function openUrl(url) {
       </template>
 
       <el-form-item label="优惠码">
-        <el-input v-model="promoCode" placeholder="可留空" style="width: 260px" />
+        <el-input v-model="promoCode" placeholder="手输自定义优惠码，可留空" style="width: 260px" />
+      </el-form-item>
+
+      <el-form-item label="试用活动">
+        <el-input v-model="promoCampaign" placeholder="如 plus-1-month-free，可留空" style="width: 260px" />
+        <el-button size="small" style="margin-left: 8px" @click="useAccountCampaign">
+          读取账号
+        </el-button>
+        <div class="hint" style="margin-top: 4px">
+          账号可用活动：{{ account?.promo_campaign_id || '无' }}；出口代理：{{ account?.proxy || '直连' }}
+        </div>
       </el-form-item>
     </el-form>
+
+    <el-alert
+      v-if="needsCodexToken" type="warning" :closable="false" show-icon
+      title="该号缺少 Codex refresh_token"
+      description="支付接口只接受 Codex 客户端签发的 access token。需要给这个号补跑一次 Codex OAuth（会重新登录，可能触发邮箱验证码和短信验证），之后就能正常生成链接。"
+      style="margin-bottom: 12px"
+    >
+      <template #default>
+        <el-button
+          size="small" type="primary" :loading="preparing" style="margin-top: 8px"
+          @click="prepareCodexToken"
+        >
+          <el-icon><Refresh /></el-icon>重登换 Codex token
+        </el-button>
+      </template>
+    </el-alert>
 
     <el-alert
       v-if="countryMismatch" type="warning" :closable="false" show-icon

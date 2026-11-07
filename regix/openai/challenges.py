@@ -11,6 +11,28 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+# OpenAI "号已被使用 / 不允许" 类错误关键字
+# ⚠️ 必须同时覆盖**机器码**和**人话**两种写法。2026-11-07 实测 HeroSMS
+#    租到的泰国号被拒时，OpenAI 回的是
+#      "Phone number already in use. Please use a different phone number."
+#    —— 人话、带空格。旧表里只有下划线写法 already_in_use，
+#    于是这个错误被判成「未识别错误」，日志误导、也没走换号分支。
+PHONE_REJECTED_PATTERNS = (
+    "phone_number_already_in_use", "already_in_use", "already_taken",
+    "already in use", "use a different phone number",
+    "phone_already_verified", "already_verified",
+    "disallowed_phone", "invalid_phone_number", "phone_number_invalid",
+    "blocked_phone", "phone_number_blocked",
+    "suspicious behavior from phone",  # OpenAI 风控：号段可疑
+)
+
+
+def is_phone_rejected(text: str) -> bool:
+    """True when OpenAI refused the phone number itself (换号有用)。"""
+    lowered = (text or "").lower()
+    return any(p in lowered for p in PHONE_REJECTED_PATTERNS)
+
+
 class ChallengeMixin:
     """Protocol methods for this domain."""
 
@@ -212,17 +234,8 @@ class ChallengeMixin:
             provider_key, per_phone_timeout, max_phone_attempts, max_code_retries_per_phone,
         )
 
-        # OpenAI "号已被使用 / 不允许" 类错误关键字
-        _PHONE_REJECTED_PATTERNS = (
-            "phone_number_already_in_use", "already_in_use", "already_taken",
-            "phone_already_verified", "already_verified",
-            "disallowed_phone", "invalid_phone_number", "phone_number_invalid",
-            "blocked_phone", "phone_number_blocked",
-            "suspicious behavior from phone",  # OpenAI 风控：号段可疑
-        )
         def _is_phone_rejected(s: str) -> bool:
-            sl = (s or "").lower()
-            return any(p in sl for p in _PHONE_REJECTED_PATTERNS)
+            return is_phone_rejected(s)
 
         last_err: Optional[Exception] = None
 

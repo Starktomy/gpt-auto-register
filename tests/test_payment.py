@@ -461,3 +461,116 @@ def test_payment_api_reports_errors_as_400(monkeypatch, clean_db):
     response = client.post("/api/payment/link", json={"email": "demo@example.com"})
     assert response.status_code == 400
     assert "风控" in response.json()["detail"]
+
+
+def test_phone_rejection_patterns_cover_human_readable_text():
+    """OpenAI rejects a recycled number with plain English, not just a code."""
+    from regix.openai.challenges import is_phone_rejected
+
+    # the exact body OpenAI returned for a recycled HeroSMS number
+    assert is_phone_rejected("Phone number already in use. Please use a different phone number.")
+    assert is_phone_rejected("phone_number_already_in_use")
+    assert is_phone_rejected("This phone number is disallowed_phone")
+    assert not is_phone_rejected("too many phone verification")
+    assert not is_phone_rejected("")
+
+
+# ─────────────────────── promo + Codex token resolution ───────────────────────
+
+
+def test_build_checkout_body_supports_promo_campaign():
+    body = build_checkout_body(
+        "plus", "US", "USD",
+        promo_code="SAVE20",
+        promo_campaign_id="plus-1-month-free",
+    )
+    assert body["promo_code"] == "SAVE20"
+    assert body["promo_campaign"] == {
+        "promo_campaign_id": "plus-1-month-free",
+        "is_coupon_from_query_param": False,
+    }
+
+
+def test_build_checkout_body_omits_empty_promos():
+    body = build_checkout_body("plus", "US", "USD")
+    assert "promo_code" not in body
+    assert "promo_campaign" not in body
+
+
+def test_resolve_checkout_token_prefers_codex_refresh(monkeypatch):
+    from regix.services import payment as payment_module
+
+    monkeypatch.setattr(
+        payment_module, "refresh_codex_token",
+        lambda rt, proxy="", timeout=30: {"access_token": "codex-at"},
+    )
+    token, source = payment_module.resolve_checkout_token(
+        {"access_token": "web-at", "refresh_token": "rt"}
+    )
+    assert (token, source) == ("codex-at", "codex_refresh")
+
+
+def test_resolve_checkout_token_falls_back_when_refresh_fails(monkeypatch):
+    from regix.services import payment as payment_module
+
+    def _boom(rt, proxy="", timeout=30):
+        raise RuntimeError("expired")
+
+    monkeypatch.setattr(payment_module, "refresh_codex_token", _boom)
+    token, source = payment_module.resolve_checkout_token(
+        {"access_token": "web-at", "refresh_token": "rt"}
+    )
+    assert (token, source) == ("web-at", "codex_refresh_failed")
+
+
+def test_resolve_checkout_token_uses_session_when_no_refresh_token():
+    from regix.services.payment import resolve_checkout_token
+
+    assert resolve_checkout_token({"access_token": "web-at"}) == ("web-at", "session")
+
+
+def test_risk_block_without_refresh_token_is_reported_as_missing_codex_token(monkeypatch, clean_db):
+    """The payments endpoint only accepts Codex tokens; a web-session token
+    produces the same "unusual activity" body as a real fraud block. The
+    service must tell those apart so the UI can offer a re-login."""
+    import regix.services.payment as payment_module
+
+    clean_db.save_registered(
+        {"email": "no-rt@example.com", "access_token": _jwt(), "refresh_token": ""}
+    )
+
+    def _risk_block(*args, **kwargs):
+        raise PaymentLinkError("checkout_risk_blocked", http_status=400)
+
+    monkeypatch.setattr(payment_module, "generate_payment_link", _risk_block)
+    with pytest.raises(PaymentLinkError) as excinfo:
+        payment_module.generate_payment_link_for_account("no-rt@example.com")
+    assert excinfo.value.code == "codex_token_missing"
+
+
+def test_check_plus_uses_registration_proxy(monkeypatch, clean_db):
+    """A check without an explicit proxy must stay on the account's own IP."""
+    import regix.api.app as app_module
+    from fastapi.testclient import TestClient
+
+    clean_db.save_registered(
+        {
+            "email": "proxy@example.com",
+            "access_token": _jwt(),
+            "refresh_token": "rt",
+            "proxy": "socks5h://user:pass@proxy.example:1080",
+        }
+    )
+    seen: dict = {}
+
+    def _fake_check(email, **kwargs):
+        seen.update(kwargs)
+        return {"status": "free", "label": "Free"}
+
+    monkeypatch.setattr("regix.services.plan_check.check_registered_plan", _fake_check)
+    monkeypatch.setattr(app_module, "ADMIN_PASSWORD", "")
+    app_module._AUTH_FAILED_TIMES.clear()
+    client = TestClient(app_module.app)
+    resp = client.post("/api/registered/check_plus", json={"emails": ["proxy@example.com"]})
+    assert resp.status_code == 200
+    assert seen["proxy_url"] == "socks5h://user:pass@proxy.example:1080"

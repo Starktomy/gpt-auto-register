@@ -296,6 +296,23 @@ def cmd_registered(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_codex_login(args: argparse.Namespace) -> int:
+    """Re-login an account so it gets a Codex refresh token."""
+    from regix.services.codex_login import CodexLoginError, mint_codex_refresh_token
+
+    try:
+        info = mint_codex_refresh_token(
+            args.email,
+            proxy=args.proxy,
+            otp_timeout=args.otp_timeout,
+        )
+    except CodexLoginError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    _print_json(info, show_secrets=args.show_secrets)
+    return 0
+
+
 def cmd_payment_link(args: argparse.Namespace) -> int:
     """Generate a Plus/Team checkout link for a registered account."""
     from regix.services.payment import PaymentLinkError, generate_payment_link_for_account
@@ -312,6 +329,7 @@ def cmd_payment_link(args: argparse.Namespace) -> int:
             interval=args.interval,
             seats=args.seats,
             promo_code=args.promo_code,
+            promo_campaign_id=args.promo_campaign,
             proxy=args.proxy,
             timeout_seconds=args.timeout,
         )
@@ -436,6 +454,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_output(registered)
     registered.set_defaults(func=cmd_registered)
 
+    codex_login = sub.add_parser(
+        "codex-login", help="给已注册账号补跑一次 Codex OAuth，拿回 refresh_token"
+    )
+    codex_login.add_argument("email", help="已注册账号的邮箱")
+    codex_login.add_argument("--proxy", default="", help="代理；留空则用该号注册时的代理")
+    codex_login.add_argument("--otp-timeout", type=int, default=180)
+    _add_common_output(codex_login)
+    codex_login.set_defaults(func=cmd_codex_login)
+
     payment_link = sub.add_parser("payment-link", help="为已注册账号生成 Plus/Team 支付链接")
     payment_link.add_argument("email", help="已注册账号的邮箱")
     payment_link.add_argument("--plan", choices=("plus", "team"), default="plus")
@@ -446,7 +473,10 @@ def build_parser() -> argparse.ArgumentParser:
     payment_link.add_argument("--workspace-name", default="", help="Team 工作区名称")
     payment_link.add_argument("--interval", choices=("month", "year"), default="month")
     payment_link.add_argument("--seats", type=int, default=2, help="Team 席位数")
-    payment_link.add_argument("--promo-code", default="", help="优惠码")
+    payment_link.add_argument("--promo-code", default="", help="自定义优惠码")
+    payment_link.add_argument(
+        "--promo-campaign", default="", help="官方试用活动 id，例如 plus-1-month-free"
+    )
     payment_link.add_argument("--proxy", default="", help="代理；留空则用该号注册时的代理")
     payment_link.add_argument("--timeout", type=float, default=20.0)
     _add_common_output(payment_link)
