@@ -548,6 +548,47 @@ class RegistrationMixin:
         logger.info("注册流程完成!")
         return self.result
 
+    def _solve_mfa_challenge_step(self, step, continue_url: str, email: str) -> tuple[str, str]:
+        """Answer an ``mfa-challenge`` step with the stored TOTP secret.
+
+        Returns ``(page_type, continue_url)`` unchanged when the step is not an
+        MFA challenge. Both the password branch and the OTP branch of
+        ``run_protocol_login`` must call this: an account with 2FA that logs in
+        through the email-code branch otherwise stops on the challenge page,
+        the redirect chain produces no callback code, and the whole login ends
+        with "no session/access token" even though the OTP was correct.
+        """
+        page_type = (self._extract_page_type(step) or "").lower()
+        continue_url = self._normalize_continue_url(continue_url)
+        if not self._is_mfa_challenge_state(page_type, continue_url):
+            return page_type, continue_url
+
+        totp_secret = (self.result.totp_secret or "").strip()
+        if not totp_secret and self._account_callback:
+            try:
+                cred = self._account_callback(email)
+                if cred and cred.get("totp_secret"):
+                    totp_secret = cred["totp_secret"]
+                    self.result.totp_secret = totp_secret
+                    logger.info("已从数据库加载 totp_secret")
+            except Exception as e:
+                logger.warning(f"account_callback 异常: {e}")
+        if not totp_secret:
+            logger.warning("进入 mfa-challenge 但没有 totp_secret，无法继续")
+            return page_type, continue_url
+
+        challenge_id = continue_url.split("/")[-1] if "/mfa-challenge/" in continue_url else ""
+        if not challenge_id:
+            logger.warning("无法从 continue_url 提取 challenge_id")
+            return page_type, continue_url
+
+        logger.info(f"提交 TOTP 码进行 2FA 验证（challenge_id={challenge_id[:16]}...）")
+        mfa_resp = self.submit_mfa_totp(_totp_now(totp_secret), challenge_id)
+        return (
+            (self._extract_page_type(mfa_resp) or "").lower(),
+            self._normalize_continue_url(self._extract_continue_url_from_step(mfa_resp)),
+        )
+
     def run_protocol_login(self, mail_provider: MailProvider, email: str, password: str = "") -> AuthResult:
         """
         纯协议登录（不创建随机邮箱）：
@@ -735,6 +776,12 @@ class RegistrationMixin:
                     raise
             continue_url = self._extract_continue_url_from_step(otp_resp)
             continue_url = self._normalize_continue_url(continue_url)
+            # ★ OTP 分支同样可能落到 mfa-challenge（2FA 账号）。漏了这步：
+            #   redirect chain 只能拿到 challenge 页 → callback 为空 →
+            #   "协议登录完成，但未拿到有效 session/access token"。
+            page_type, continue_url = self._solve_mfa_challenge_step(
+                otp_resp, continue_url, email
+            )
             if self._is_add_phone_state(page_type=self._extract_page_type(otp_resp), continue_url=continue_url):
                 continue_url = self._normalize_continue_url(
                     self._handle_add_phone_verification(continue_url=continue_url)

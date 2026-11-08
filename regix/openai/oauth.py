@@ -65,13 +65,15 @@ class OAuthMixin:
         构建用于获取 refresh_token 的 Codex OAuth 授权 URL。
         参考 any-regix 的实现：独立 client_id + redirect_uri + 可控 PKCE。
         """
-        client_id = (os.getenv("OAUTH_CODEX_CLIENT_ID", "") or "").strip() or "app_EMoamEEZ73f0CkXaXp7hrann"
-        redirect_uri = (os.getenv("OAUTH_CODEX_REDIRECT_URI", "") or "").strip() or "http://localhost:1455/auth/callback"
-        scope = (os.getenv("OAUTH_CODEX_SCOPE", "") or "").strip() or "openid email profile offline_access"
+        # 一律走 _get_env：registrar / codex-login 用 env_overrides 传参，
+        # 直接读 os.getenv 会把并发实例的覆盖值全部漏掉。
+        client_id = (self._get_env("OAUTH_CODEX_CLIENT_ID", "") or "").strip() or "app_EMoamEEZ73f0CkXaXp7hrann"
+        redirect_uri = (self._get_env("OAUTH_CODEX_REDIRECT_URI", "") or "").strip() or "http://localhost:1455/auth/callback"
+        scope = (self._get_env("OAUTH_CODEX_SCOPE", "") or "").strip() or "openid email profile offline_access"
         state = self._b64url_no_pad(secrets.token_bytes(24))
         verifier, challenge = self._build_pkce_pair()
         prompt = (
-            (os.getenv("OAUTH_CODEX_PROMPT", "login") or "").strip()
+            (self._get_env("OAUTH_CODEX_PROMPT", "login") or "").strip()
             if prompt_override is None
             else (prompt_override or "").strip()
         )

@@ -107,10 +107,17 @@ def login_and_exchange(
         # 走「已有账号」登录链，不新建账号
         "WEBUI_ALLOW_LOGIN": "1",
         "OTP_TIMEOUT": str(max(60, int(otp_timeout or 180))),
-        # 只要 Codex RT，不要二次授权
-        "OAUTH_CODEX_RT_EXCHANGE": "1",
+        # ⚠️ 这里必须是 0：run_protocol_login 内部若也跑 Codex 交换，
+        #    它会立刻再发一封 OTP（实测 429 rate_limit_exceeded，随后
+        #    邮件根本不到，整条登录被拖死）。网页登录成功后，下面显式
+        #    调的 oauth_codex_rt_exchange() 会复用这套已认证的 cookie，
+        #    通常直接进 consent，不再要第二封码。
+        "OAUTH_CODEX_RT_EXCHANGE": "0",
         "OAUTH_CODEX_RT_BEFORE_CALLBACK": "0",
         "OAUTH_SECONDARY_AUTHORIZE_EXCHANGE": "0",
+        # 登录已经建立 auth 会话，再带 prompt=login 会强制重登（又发一封
+        # OTP → 429）。空值让 authorize 直接复用会话进 consent。
+        "OAUTH_CODEX_PROMPT": "",
     }
 
     def _account_callback(_email: str) -> dict:
