@@ -127,9 +127,16 @@ def login_and_exchange(
     )
     try:
         flow.run_protocol_login(mail, normalized, password)
+    except Exception as exc:  # noqa: BLE001
+        # 网页 session 拿不到不代表 Codex 授权拿不到：后者有自己的
+        # authorize/login 推进，且正是我们真正需要的 refresh_token。
+        # 早期实现把两者绑死，导致「session/access token 缺失」直接把
+        # 能成功的 Codex 交换也一起放弃了。
+        logger.warning("[codex-login] web session 登录未完成，继续尝试 Codex 授权: %s", exc)
+    try:
         flow.oauth_codex_rt_exchange(mail_provider=mail)
     except Exception as exc:  # noqa: BLE001
-        raise CodexLoginError(f"重登失败: {exc}") from exc
+        raise CodexLoginError(f"Codex 授权失败: {exc}") from exc
 
     result = flow.result.to_dict()
     refresh_token = str(result.get("refresh_token") or "").strip()

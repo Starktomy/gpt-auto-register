@@ -243,6 +243,49 @@ def update_registered_manual(email: str, password: Optional[str] = None,
         return True
 
 
+def update_registered_tokens(
+    email: str,
+    *,
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+    id_token: Optional[str] = None,
+) -> bool:
+    """Persist rotated OAuth tokens.
+
+    The Codex refresh grant **rotates** the refresh token: the response carries
+    a new one and the old one is invalidated. Anyone who refreshes must write
+    it back immediately, otherwise the next refresh uses a dead token and the
+    account can never mint a Codex access token again. Passing ``None`` leaves
+    a column alone; an empty string clears it.
+
+    Returns ``False`` when the email is unknown.
+    """
+    email = (email or "").strip().lower()
+    if not email:
+        return False
+    sets: list[str] = []
+    values: list[str] = []
+    for column, value in (
+        ("access_token", access_token),
+        ("refresh_token", refresh_token),
+        ("id_token", id_token),
+    ):
+        if value is not None:
+            sets.append(f"{column}=?")
+            values.append(str(value))
+    if not sets:
+        return False
+    with _lock:
+        con = _conn()
+        row = con.execute("SELECT email FROM registered WHERE email=?", (email,)).fetchone()
+        if not row:
+            return False
+        values.append(email)
+        con.execute(f"UPDATE registered SET {', '.join(sets)} WHERE email=?", values)
+        con.commit()
+        return True
+
+
 def update_registered_proxy(email: str, proxy: str) -> bool:
     """Set (or clear) the per-account proxy stored in ``extra_json.proxy``.
 

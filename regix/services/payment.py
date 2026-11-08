@@ -743,6 +743,23 @@ def resolve_checkout_token(row: dict, *, proxy: str = "") -> tuple[str, str]:
             fresh = refresh_codex_token(refresh, proxy=proxy)
             token = str(fresh.get("access_token") or "").strip()
             if token:
+                # The grant rotates the refresh token. Persist it right away:
+                # keeping the old one makes the next refresh fail with
+                # "refresh_token_reused" and the account loses the ability to
+                # mint Codex tokens entirely.
+                new_refresh = str(fresh.get("refresh_token") or "").strip()
+                new_id = str(fresh.get("id_token") or "").strip()
+                try:
+                    from regix.storage import facade as db
+
+                    db.update_registered_tokens(
+                        str((row or {}).get("email") or ""),
+                        access_token=token,
+                        refresh_token=new_refresh or None,
+                        id_token=new_id or None,
+                    )
+                except Exception as exc:  # noqa: BLE001 - never block the link
+                    logger.warning("[payment] 新 token 落库失败: %s", exc)
                 return token, "codex_refresh"
             logger.warning("[payment] Codex token 刷新返回里没有 access_token")
         except Exception as exc:  # noqa: BLE001 - fall back to the stored token

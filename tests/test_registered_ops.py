@@ -250,3 +250,49 @@ def test_bind_2fa_api_returns_new_secret(clean_db, monkeypatch):
     resp = client.post("/api/registered/bind_2fa", json={"email": "fresh@example.com"})
     assert resp.status_code == 200
     assert resp.json()["totp_secret"] == "ABC234"
+
+
+# ─────────────────────── rotated token persistence ───────────────────────
+
+
+def test_update_registered_tokens_only_touches_given_columns(clean_db):
+    clean_db.save_registered(
+        {
+            "email": "tok@example.com",
+            "access_token": "old-at",
+            "refresh_token": "old-rt",
+            "id_token": "old-id",
+            "password": "pw",
+        }
+    )
+    assert clean_db.update_registered_tokens("tok@example.com", refresh_token="new-rt") is True
+    row = clean_db.get_registered("tok@example.com")
+    assert row["refresh_token"] == "new-rt"
+    assert row["access_token"] == "old-at"
+    assert row["id_token"] == "old-id"
+    assert row["password"] == "pw"
+
+
+def test_resolve_checkout_token_persists_rotated_refresh_token(monkeypatch, clean_db):
+    """A refresh grant invalidates the old RT; it must be written back."""
+    import regix.services.payment as payment_module
+
+    clean_db.save_registered(
+        {"email": "rotate@example.com", "access_token": "web-at", "refresh_token": "rt-0"}
+    )
+    row = clean_db.get_registered("rotate@example.com")
+    monkeypatch.setattr(
+        payment_module,
+        "refresh_codex_token",
+        lambda rt, proxy="", timeout=30: {
+            "access_token": "codex-at",
+            "refresh_token": "rt-1",
+            "id_token": "id-1",
+        },
+    )
+    token, source = payment_module.resolve_checkout_token(row)
+    assert (token, source) == ("codex-at", "codex_refresh")
+    stored = clean_db.get_registered("rotate@example.com")
+    assert stored["refresh_token"] == "rt-1"
+    assert stored["access_token"] == "codex-at"
+    assert stored["id_token"] == "id-1"
