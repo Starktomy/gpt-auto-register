@@ -218,6 +218,13 @@ Measured on the same account back to back; all 8 accounts that have a
 access token (`regix/openai/codex_token.py`) and only falls back to the stored
 web token when there is no refresh token.
 
+**The refresh grant rotates the refresh token.** The response carries a new
+one and the old one stops working (`refresh_token_reused`). Anyone who
+refreshes must persist the new tokens immediately via
+`db.update_registered_tokens()`. An earlier version refreshed and used the new
+access token but kept the old refresh token, which silently killed Codex
+access for every account that generated a few payment links.
+
 Accounts registered **without** the Codex chain have no refresh token and
 cannot create a checkout session. They need one re-login, which is exactly the
 same Codex OAuth flow the registration already runs:
