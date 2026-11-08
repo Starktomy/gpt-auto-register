@@ -574,3 +574,16 @@ def test_check_plus_uses_registration_proxy(monkeypatch, clean_db):
     resp = client.post("/api/registered/check_plus", json={"emails": ["proxy@example.com"]})
     assert resp.status_code == 200
     assert seen["proxy_url"] == "socks5h://user:pass@proxy.example:1080"
+
+
+def test_generate_payment_link_reports_dead_proxy():
+    """An expired sticky proxy must not surface as a raw curl error."""
+    class _DeadProxy(_Session):
+        def post(self, url, headers=None, data=None, timeout=None, allow_redirects=None):
+            raise RuntimeError(
+                "Failed to perform, curl: (97) cannot complete SOCKS5 connection to auth.openai.com"
+            )
+
+    with pytest.raises(PaymentLinkError) as excinfo:
+        generate_payment_link(_jwt(), session_factory=_DeadProxy)
+    assert excinfo.value.code == "proxy_unavailable"

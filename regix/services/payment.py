@@ -504,6 +504,22 @@ def _classify_checkout_error(detail: str, status: int) -> str:
     return "checkout_http_failed"
 
 
+def _looks_like_proxy_failure(exc: Exception) -> bool:
+    """True when the request never reached OpenAI because the proxy is gone.
+
+    Short-lived sticky proxies expire; the old entry stays in
+    ``registered.extra.proxy`` and every later request dies with
+    ``curl: (97) cannot complete SOCKS5 connection``. That is a proxy problem,
+    not an account problem, so it gets its own error code.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "curl: (97)", "cannot complete socks", "proxyerror",
+        "proxy connect", "failed to perform",
+    )
+    return any(marker in text for marker in markers)
+
+
 def detect_exit_country(proxy: str = "", timeout_seconds: float = 8.0) -> str:
     """Best-effort country of the IP this host exits from.
 
@@ -654,16 +670,23 @@ def generate_payment_link(
             if session_factory is not None
             else create_http_session(proxy=proxy or None, impersonate="chrome110")
         )
-        payload = _post_checkout(
-            session,
-            body,
-            checkout_headers(
-                token,
-                cookie_header=cookie_header,
-                device_id=device_id,
-            ),
-            timeout_seconds,
-        )
+        try:
+            payload = _post_checkout(
+                session,
+                body,
+                checkout_headers(
+                    token,
+                    cookie_header=cookie_header,
+                    device_id=device_id,
+                ),
+                timeout_seconds,
+            )
+        except PaymentLinkError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if _looks_like_proxy_failure(exc):
+                raise PaymentLinkError("proxy_unavailable", detail=str(exc)[:200]) from exc
+            raise
 
         session_id = extract_session_id(payload)
         if not session_id:

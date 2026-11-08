@@ -39,6 +39,7 @@ _ERROR_MESSAGES = {
     "checkout_risk_blocked": "OpenAI 风控拦截：该账号被判定为异常活动，换个出口 IP 或稍后再试",
     "codex_token_missing": "该号没有 Codex refresh_token，支付接口只认 Codex 签发的 AT；先点「重登换 Codex token」",
     "codex_token_refresh_failed": "Codex refresh_token 刷新失败，需要重登一次",
+    "proxy_unavailable": "该号绑定的代理已经连不上（粘性代理过期），请清除或更换代理后重试",
     "checkout_country_mismatch": "账单国家必须与请求出口 IP 的国家一致（当前出口 {exit_country}），改用对应区域或先切换代理",
     "checkout_rate_limited": "OpenAI 限流了，稍后再试",
 }
