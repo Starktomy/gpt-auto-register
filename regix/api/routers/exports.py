@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ...services import export_formats
@@ -153,6 +154,39 @@ class UpdateCredReq(BaseModel):
     # None = 该字段不动；空串 = 主动清空。前端不填的字段就别传。
     password: Optional[str] = Field(None, description="新密码，None=不修改")
     totp_secret: Optional[str] = Field(None, description="新 TOTP secret，None=不修改")
+
+
+class ImportRegisteredReq(BaseModel):
+    text: str = Field(
+        ...,
+        description="每行一个账号。支持 JSON，或 "
+                    "email----password----2FA----access_token----refresh_token----session_token----id_token",
+    )
+
+
+@router.post("/api/registered/import")
+def api_import_registered(req: ImportRegisteredReq):
+    """Import already-registered credentials so payment links can use them.
+
+    This does not touch the mailbox pool: it writes ``registered`` rows only.
+    One invalid line rejects the whole batch (422 with per-line reasons), the
+    same contract as the mailbox import.
+    """
+    from ...services.account_import import RegisteredImportError, parse_registered_import
+
+    try:
+        rows = parse_registered_import(req.text)
+    except RegisteredImportError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "message": str(exc), "errors": exc.errors},
+        )
+    result = db.import_registered_accounts(rows)
+    logger.info(
+        f"[registered] 导入账号 parsed={len(rows)} "
+        f"inserted={result['inserted']} updated={result['updated']}"
+    )
+    return {"ok": True, "parsed": len(rows), **result}
 
 
 @router.post("/api/registered/update_credentials")

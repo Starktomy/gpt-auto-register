@@ -36,6 +36,10 @@ export const updateRegisteredProxy = (payload) =>
 export const bindTotp = (payload) =>
   http.post('/api/registered/bind_2fa', payload, { timeout: 300000 })
 
+// 导入已注册账号凭证（JSON 或 ---- 分隔），用于生成支付链接
+export const importRegisteredAccounts = (text) =>
+  http.post('/api/registered/import', { text }, { timeout: 120000 })
+
 // 导出后清理用：把号池那一行也删掉。
 // 从 accounts.js 转出来一份，省得 Registered.vue 同时 import 两个 api 模块。
 export { bulkDeleteAccounts } from './accounts'

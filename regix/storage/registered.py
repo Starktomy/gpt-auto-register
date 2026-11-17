@@ -286,6 +286,44 @@ def update_registered_tokens(
         return True
 
 
+_IMPORT_COLUMNS = (
+    "password", "totp_secret", "totp_factor_id",
+    "access_token", "refresh_token", "session_token", "id_token",
+    "device_id", "csrf_token", "cookie_header", "session_json",
+)
+
+
+def import_registered_accounts(rows: list[dict]) -> dict:
+    """Upsert imported credentials, merging with rows that already exist.
+
+    Empty fields in the import never wipe an existing value: importing
+    ``email----RT`` on top of an account that already has a password / 2FA /
+    session keeps all of them. Anything outside the credential columns
+    (``extra.proxy``, ``plus_check``) is preserved as well.
+    """
+    inserted = updated = 0
+    for row in rows or []:
+        email = str((row or {}).get("email") or "").strip().lower()
+        if not email:
+            continue
+        existing = get_registered(email)
+        merged: dict = {"email": email}
+        for column in _IMPORT_COLUMNS:
+            new_value = row.get(column)
+            if new_value not in (None, ""):
+                merged[column] = str(new_value)
+            elif existing:
+                merged[column] = existing.get(column) or ""
+        if existing:
+            # flatten extra so save_registered puts it back under extra_json
+            merged.update(existing.get("extra") or {})
+            updated += 1
+        else:
+            inserted += 1
+        save_registered(merged)
+    return {"inserted": inserted, "updated": updated}
+
+
 def update_registered_proxy(email: str, proxy: str) -> bool:
     """Set (or clear) the per-account proxy stored in ``extra_json.proxy``.
 

@@ -313,6 +313,27 @@ def cmd_codex_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_registered(args: argparse.Namespace) -> int:
+    """Import already-registered credentials (JSON or ---- separated lines)."""
+    from regix.services.account_import import RegisteredImportError, parse_registered_import
+
+    if args.file and args.file != "-":
+        with open(args.file, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    else:
+        text = sys.stdin.read()
+    try:
+        rows = parse_registered_import(text)
+    except RegisteredImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        for item in exc.errors:
+            print(f"  line {item.get('line')}: {item.get('error')}", file=sys.stderr)
+        return 1
+    result = db.import_registered_accounts(rows)
+    _print_json({"ok": True, "parsed": len(rows), **result})
+    return 0
+
+
 def cmd_bind_2fa(args: argparse.Namespace) -> int:
     """Bind TOTP 2FA to a registered account that does not have one."""
     from regix.services.two_factor import add_totp_2fa
@@ -484,6 +505,15 @@ def build_parser() -> argparse.ArgumentParser:
     codex_login.add_argument("--otp-timeout", type=int, default=180)
     _add_common_output(codex_login)
     codex_login.set_defaults(func=cmd_codex_login)
+
+    import_registered = sub.add_parser(
+        "import-registered",
+        help="导入已注册账号凭证（JSON 或 email----password----2FA----AT----RT----ST----ID）",
+    )
+    import_registered.add_argument(
+        "file", nargs="?", default="-", help="文件路径；留空或 - 表示从 stdin 读"
+    )
+    import_registered.set_defaults(func=cmd_import_registered)
 
     bind_2fa = sub.add_parser("bind-2fa", help="给已注册账号补绑 TOTP 2FA（已有 secret 不覆盖）")
     bind_2fa.add_argument("email", help="已注册账号的邮箱")

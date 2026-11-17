@@ -6,7 +6,7 @@ import {
   listRegistered, getRegistered, deleteRegistered,
   bulkDeleteRegistered, bulkDeleteAccounts, checkPlus,
   listExportFormats, exportRegistered, updateCredentials, markAbnormal,
-  updateRegisteredProxy, bindTotp,
+  updateRegisteredProxy, bindTotp, importRegisteredAccounts,
 } from '@/api/register'
 import { copyText, fmtTime } from '@/api/request'
 import { useFormStore, proxyText } from '@/stores/form'
@@ -427,6 +427,53 @@ async function saveProxy() {
 // ── 一键补绑 2FA（只对还没有 secret 的号显示按钮）──
 const binding2fa = ref('')
 
+// ── 导入已注册账号（凭证直导，不是邮箱号池）──
+const importVisible = ref(false)
+const importText = ref('')
+const importing = ref(false)
+const importResult = ref('')
+const importErrors = ref([])
+const IMPORT_PLACEHOLDER = [
+  '每行一个账号，两种格式任选：',
+  'email----password----2FA----access_token----refresh_token----session_token----id_token',
+  '{"email":"a@b.com","password":"...","totp_secret":"...","access_token":"...","refresh_token":"..."}',
+].join('\n')
+
+function openImport() {
+  importText.value = ''
+  importResult.value = ''
+  importErrors.value = []
+  importVisible.value = true
+}
+
+async function doImportRegistered() {
+  if (!importText.value.trim()) {
+    ElMessage.warning('请输入要导入的账号')
+    return
+  }
+  importing.value = true
+  importResult.value = ''
+  importErrors.value = []
+  try {
+    const r = await importRegisteredAccounts(importText.value.trim())
+    importResult.value = `解析 ${r.parsed} 个，新增 ${r.inserted}，更新 ${r.updated}`
+    ElMessage.success('导入完成')
+    importText.value = ''
+    await load(true)
+  } catch (e) {
+    if (e.status === 422 && e.data?.errors?.length) {
+      importErrors.value = e.data.errors
+      importResult.value = `有 ${e.data.errors.length} 行不合法，整批未导入`
+      ElMessage.error('导入被拒绝，请修正后重试')
+    } else {
+      importResult.value = '导入失败: ' + e.message
+      ElMessage.error(e.message)
+    }
+  } finally {
+    importing.value = false
+  }
+}
+
 async function bind2fa(row) {
   if (!(await confirm(`给 ${row.email} 绑定 TOTP 2FA？\n（会重走一次登录，可能收到邮件验证码，约 1~2 分钟）`))) return
   binding2fa.value = row.email
@@ -497,6 +544,9 @@ onActivated(() => {
           检测选中 ({{ selected.length }})
         </el-button>
         <!-- 独立按钮：生成 Plus/Team 支付链接。和检测/导出互不影响。 -->
+        <el-button @click="openImport">
+          <el-icon><Upload /></el-icon>导入账号
+        </el-button>
         <el-button type="primary" plain @click="openPaymentLink">
           <el-icon><Link /></el-icon>生成支付链接
         </el-button>
@@ -728,6 +778,32 @@ onActivated(() => {
         <template #footer>
           <el-button @click="editVisible = false">取消</el-button>
           <el-button type="primary" :loading="editSaving" @click="saveEdit">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 导入已注册账号（凭证直导）：支付链接只认 registered 里的号 -->
+      <el-dialog v-model="importVisible" title="导入已注册账号" width="780px" top="7vh">
+        <el-alert
+          type="info" :closable="false" show-icon style="margin-bottom: 12px"
+          title="这里导入的是已注册账号的凭证，不是邮箱号池"
+          description="导入后即可在「注册结果」里生成支付链接、检查 Plus。至少需要 refresh_token（或 access_token）。"
+        />
+        <el-input
+          v-model="importText" type="textarea" :rows="10" class="mono"
+          :placeholder="IMPORT_PLACEHOLDER"
+        />
+        <div class="hint" style="margin-top: 8px; line-height: 1.7">
+          `----` 格式按顺序填，后面缺的留空即可；JSON 支持 accessToken / refreshToken 这类驼峰字段和嵌套 tokens 对象。
+          邮箱已存在时会合并更新，不会清空已有的密码和 2FA secret。
+        </div>
+        <div v-if="importResult" class="hint" style="margin-top: 10px; font-weight: 600">{{ importResult }}</div>
+        <el-table v-if="importErrors.length" :data="importErrors" size="small" style="margin-top: 10px" max-height="200">
+          <el-table-column prop="line" label="行号" width="80" />
+          <el-table-column prop="error" label="原因" />
+        </el-table>
+        <template #footer>
+          <el-button @click="importVisible = false">关闭</el-button>
+          <el-button type="primary" :loading="importing" @click="doImportRegistered">导入</el-button>
         </template>
       </el-dialog>
 
